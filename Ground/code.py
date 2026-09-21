@@ -43,6 +43,7 @@ import array
 import board
 import busio
 import digitalio
+import supervisor
 import usb_host
 import usb.core
 import displayio
@@ -134,6 +135,19 @@ lcd_backlight = digitalio.DigitalInOut(board.GP13)
 lcd_backlight.direction = digitalio.Direction.OUTPUT
 lcd_backlight.value = True
 
+# LCD HAT SELECT button: GP19, active low.
+# Press after the handset has been plugged in/buzzed to perform the
+# CircuitPython soft reload that we know makes USB enumeration reliable.
+reload_button = digitalio.DigitalInOut(board.GP19)
+reload_button.direction = digitalio.Direction.INPUT
+reload_button.pull = digitalio.Pull.UP
+
+# Avoid a reload loop if SELECT is still held when code.py restarts.
+while not reload_button.value:
+    time.sleep(0.02)
+
+reload_button_armed = True
+
 lcd_bus = fourwire.FourWire(
     lcd_spi,
     command=board.GP8,
@@ -165,13 +179,14 @@ def make_label(text, x, y, scale=1):
     lcd_group.append(item)
     return item
 
-lcd_title = make_label("MANTA GROUND", 4, 10, 1)
-lcd_alt   = make_label("ALT: ---.- m", 4, 30, 1)
-lcd_bat   = make_label("BAT: --.- V  --.- A", 4, 48, 1)
-lcd_air   = make_label("AIR: --.- m/s", 4, 66, 1)
-lcd_hb    = make_label("HEARTBEATS: 0", 4, 84, 1)
-lcd_crsf  = make_label("TX:0 RX:0 BAD:0", 4, 102, 1)
-lcd_link  = make_label("SIGNAL LOST", 4, 122, 1)
+lcd_title   = make_label("MANTA GROUND", 4, 8, 1)
+lcd_handset = make_label("HANDSET: NOT CONNECTED", 4, 24, 1)
+lcd_alt     = make_label("ALT: ---.- m", 4, 40, 1)
+lcd_bat     = make_label("BAT:--.-V --.-A ---%", 4, 56, 1)
+lcd_air     = make_label("AIR: --.- m/s", 4, 72, 1)
+lcd_hb      = make_label("HEARTBEATS: 0", 4, 88, 1)
+lcd_crsf    = make_label("TX:0 RX:0 BAD:0", 4, 104, 1)
+lcd_link    = make_label("SIGNAL LOST", 4, 122, 1)
 
 last_lcd_update = 0.0
 LCD_UPDATE_INTERVAL = 0.20
@@ -194,6 +209,8 @@ last_telemetry_type = None
 usb_port = usb_host.Port(board.GP2, board.GP3)
 
 device = None
+handset_usb_found = False
+handset_connected = False
 
 rx_buffer = array.array(
     "B",
@@ -235,6 +252,30 @@ def service_led():
 
 
 # ============================================================
+# LCD HAT SELECT -> CIRCUITPYTHON SOFT RELOAD
+# ============================================================
+
+def service_reload_button():
+    global reload_button_armed
+
+    if reload_button.value:
+        reload_button_armed = True
+        return
+
+    if not reload_button_armed:
+        return
+
+    time.sleep(0.05)  # debounce
+
+    if not reload_button.value:
+        reload_button_armed = False
+        print("LCD SELECT pressed - soft reload")
+        lcd_handset.text = "HANDSET: RELOADING..."
+        time.sleep(0.10)
+        supervisor.reload()
+
+
+# ============================================================
 # XBOX GIP INITIALISATION
 # ============================================================
 
@@ -273,6 +314,8 @@ def initialise_gip(dev):
 
 def find_controller():
     global device
+    global handset_usb_found
+    global handset_connected
 
     dev = usb.core.find(
         idVendor=VID,
@@ -280,6 +323,8 @@ def find_controller():
     )
 
     if dev is None:
+        handset_usb_found = False
+        handset_connected = False
         return False
 
     print()
@@ -303,8 +348,10 @@ def find_controller():
     initialise_gip(dev)
 
     device = dev
+    handset_usb_found = True
+    handset_connected = False
 
-    print("USB active")
+    print("USB active - waiting for valid GIP input")
     print()
 
     return True
@@ -517,6 +564,13 @@ def update_lcd(force=False):
         air = telemetry_airspeed_ms
     else:
         alt = volt = curr = remain = air = None
+
+    if handset_connected:
+        lcd_handset.text = "HANDSET: CONNECTED"
+    elif handset_usb_found:
+        lcd_handset.text = "HANDSET: USB FOUND"
+    else:
+        lcd_handset.text = "HANDSET: NOT CONNECTED"
 
     lcd_alt.text = "ALT: %6.1f m" % alt if alt is not None else "ALT: ---.- m"
 
@@ -792,6 +846,7 @@ update_lcd(force=True)
 
 
 while True:
+    service_reload_button()
     service_led()
 
     # --------------------------------------------------------
@@ -835,6 +890,9 @@ while True:
                 channels = decode_report(data)
 
                 if channels is not None:
+                    handset_usb_found = True
+                    handset_connected = True
+
                     # Only update the demanded channel state here. Actual
                     # CRSF transmission is performed by the fixed-rate
                     # scheduler below.
@@ -846,6 +904,8 @@ while True:
         except Exception as e:
             print("USB read error:", repr(e))
             device = None
+            handset_usb_found = False
+            handset_connected = False
 
     # --------------------------------------------------------
     # Fixed-rate CRSF UART transmitter: 25 Hz / every 40 ms
@@ -902,6 +962,7 @@ while True:
 
         print(
             "UART TX %.1f/s" % tx_rate,
+            "| HANDSET", "CONNECTED" if handset_connected else ("USB_FOUND" if handset_usb_found else "NONE"),
             "| TOTAL", packet_count,
             "| TXERR", tx_error_count,
             "| TELEM RX", telemetry_frame_count,
