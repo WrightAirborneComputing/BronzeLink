@@ -733,6 +733,7 @@ def make_crsf_frame(channels):
 # the handset buttons are released.
 channel_5_latched = CRSF_MIN
 channel_6_latched = CRSF_MIN
+channel_8_latched = CRSF_MIN
 
 # Previous shoulder states are used so CH5 responds only to a new press.
 # Releasing either shoulder never changes the latched CH5 value.
@@ -742,6 +743,7 @@ previous_right_shoulder = False
 def decode_report(data):
     global channel_5_latched
     global channel_6_latched
+    global channel_8_latched
     global previous_left_shoulder
     global previous_right_shoulder
     # Xbox GIP input packet is currently 36 bytes.
@@ -869,6 +871,21 @@ def decode_report(data):
     if button_a:
         channel_6_latched = pwm_to_crsf(1600)
 
+    # --------------------------------------------------------
+    # CH8 ARM channel (latched):
+    #   top-right centre / Menu -> 1000 us
+    #   top-left centre / View  -> 2000 us
+    #   release -> retain selected value
+    #
+    # These two buttons are dedicated to CH8 and have no other
+    # CRSF channel mapping.
+    # --------------------------------------------------------
+    if top_right:
+        channel_8_latched = pwm_to_crsf(1000)
+
+    if top_left:
+        channel_8_latched = pwm_to_crsf(2000)
+
     channels = [
         stick_to_crsf(right_x, False),     # CH1 Roll
         stick_to_crsf(right_y, True),      # CH2 Pitch
@@ -878,7 +895,7 @@ def decode_report(data):
         channel_5_latched,                          # CH5 latched shoulder selector
         channel_6_latched,                          # CH6 latched face-button selector
         CRSF_MIN,                                   # CH7 unused
-        CRSF_MIN,                                   # CH8 unused
+        channel_8_latched,                          # CH8 ARM latched
 
         trigger_to_crsf(left_trigger),              # CH9 LT analogue
         trigger_to_crsf(right_trigger),             # CH10 RT analogue
@@ -1063,3 +1080,4 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
