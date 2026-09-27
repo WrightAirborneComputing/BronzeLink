@@ -179,14 +179,13 @@ def make_label(text, x, y, scale=1):
     lcd_group.append(item)
     return item
 
-lcd_title   = make_label("MANTA GROUND", 4, 8, 1)
-lcd_handset = make_label("HANDSET: NOT CONNECTED", 4, 24, 1)
-lcd_alt     = make_label("ALT: ---.- m", 4, 40, 1)
-lcd_bat     = make_label("BAT:--.-V --.-A ---%", 4, 56, 1)
-lcd_air     = make_label("AIR: --.- m/s", 4, 72, 1)
-lcd_hb      = make_label("HEARTBEATS: 0", 4, 88, 1)
-lcd_crsf    = make_label("TX:0 RX:0 BAD:0", 4, 104, 1)
-lcd_link    = make_label("SIGNAL LOST", 4, 122, 1)
+lcd_title   = make_label("MODE: ---", 4, 8, 1)
+lcd_alt     = make_label("ALT: ---.- m", 4, 24, 1)
+lcd_bat     = make_label("BAT:--.-V --.-A ---%", 4, 40, 1)
+lcd_air     = make_label("AIR: --.- m/s", 4, 56, 1)
+lcd_crsf    = make_label("TX:0 RX:0 BAD:0", 4, 72, 1)
+lcd_link    = make_label("SIGNAL LOST", 4, 104, 1)
+lcd_handset = make_label("HANDSET: NOT CONNECTED", 4, 122, 1)
 
 last_lcd_update = 0.0
 LCD_UPDATE_INTERVAL = 0.20
@@ -197,6 +196,7 @@ telemetry_voltage_v = None
 telemetry_current_a = None
 telemetry_remaining_pct = None
 telemetry_airspeed_ms = None
+telemetry_flight_mode = None
 telemetry_heartbeat_count = 0
 last_valid_telemetry_time = None
 last_telemetry_type = None
@@ -533,6 +533,7 @@ def decode_telemetry_frame(frame):
     global telemetry_current_a
     global telemetry_remaining_pct
     global telemetry_airspeed_ms
+    global telemetry_flight_mode
     global telemetry_heartbeat_count
     global last_valid_telemetry_time
     global last_telemetry_type
@@ -569,6 +570,19 @@ def decode_telemetry_frame(frame):
     elif frame_type == 0x0A and len(frame) >= 6:
         telemetry_airspeed_ms = be_u16(frame, 3) / 10.0
 
+    elif frame_type == 0x21:
+        # CRSF FLIGHT_MODE: zero-terminated ASCII payload.
+        payload = frame[3:-1]
+        chars = []
+        for value in payload:
+            if value == 0:
+                break
+            if 32 <= value <= 126:
+                chars.append(chr(value))
+        telemetry_flight_mode = "".join(chars).strip()
+        if not telemetry_flight_mode:
+            telemetry_flight_mode = None
+
     elif frame_type == 0x0B:
         telemetry_heartbeat_count += 1
 
@@ -604,6 +618,8 @@ def update_lcd(force=False):
     else:
         lcd_handset.text = "HANDSET: NOT CONNECTED"
 
+    lcd_title.text = "MODE: " + (telemetry_flight_mode if link_ok and telemetry_flight_mode else "---")
+
     lcd_alt.text = "ALT: %6.1f m" % alt if alt is not None else "ALT: ---.- m"
 
     if volt is not None or curr is not None:
@@ -615,7 +631,6 @@ def update_lcd(force=False):
         lcd_bat.text = "BAT:--.-V --.-A ---%"
 
     lcd_air.text = "AIR: %4.1f m/s" % air if air is not None else "AIR: --.- m/s"
-    lcd_hb.text = "HEARTBEATS: %d" % telemetry_heartbeat_count
     lcd_crsf.text = "TX:%d RX:%d BAD:%d" % (packet_count, telemetry_frame_count, telemetry_bad_crc_count)
     lcd_link.text = "LINK OK" if link_ok else "SIGNAL LOST"
 
@@ -1112,3 +1127,4 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
