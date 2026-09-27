@@ -26,6 +26,7 @@ import time
 # ============================================================
 FREQUENCY = 868000000
 FC_BAUD = 420000
+MAVLINK_BAUD = 115200
 LINK_TIMEOUT_MS = 1000
 TX_TIMEOUT_MS = 200
 TELEMETRY_REPLY_DELAY_MS = 20   # guard time: let ground finish TX->RX turnaround
@@ -33,7 +34,11 @@ TELEMETRY_REPLY_DELAY_MS = 20   # guard time: let ground finish TX->RX turnaroun
 # Preferred return-telemetry rotation.
 # One frame is returned immediately after each valid RC uplink packet:
 # FLIGHT_MODE -> BATTERY -> GPS -> repeat.
-TELEMETRY_PRIORITY = (0x21, 0x08, 0x02)
+TELEMETRY_PRIORITY = (
+    0x21,  # FLIGHT_MODE
+    0x08,  # BATTERY
+    0x09,  # BARO_ALT (generated from MAVLink LOCAL_POSITION_NED)
+)
 
 # ============================================================
 # FC UART
@@ -47,6 +52,20 @@ fc_uart = UART(
     tx=Pin(4),
     rx=Pin(5)
 )
+
+# MAVLink receive-only input:
+#   FCS MAVLink TX -> Pico GP1
+#   common GND
+mav_uart = UART(
+    0,
+    baudrate=MAVLINK_BAUD,
+    bits=8,
+    parity=None,
+    stop=1,
+    tx=Pin(0),   # not connected
+    rx=Pin(1)
+)
+
 
 # ============================================================
 # SX1262
@@ -576,6 +595,129 @@ def receive_packet():
 
 
 # ============================================================
+# MAVLINK LOCAL_POSITION_NED -> CRSF BARO_ALT
+#
+# FCS MAVLink TX -> Pico GP1
+# UART0 RX @ 115200 baud
+#
+# MAVLink message 32 LOCAL_POSITION_NED payload:
+#   uint32 time_boot_ms  offset 0
+#   float  x             offset 4
+#   float  y             offset 8
+#   float  z             offset 12   (NED: positive down)
+#   float  vx            offset 16
+#   float  vy            offset 20
+#   float  vz            offset 24   (NED: positive down)
+#
+# Therefore:
+#   altitude above local origin = -z
+#   climb rate                  = -vz
+# ============================================================
+
+import struct
+
+mav_buffer = bytearray()
+mav_relative_alt_m = None
+mav_vertical_speed_mps = None
+mav_alt_count = 0
+
+
+def make_crsf_baro_altitude(relative_alt_m, vertical_speed_mps):
+    # CRSF BARO_ALT normal altitude encoding:
+    # altitude in decimetres with +1000 m offset.
+    encoded_alt = int(round(relative_alt_m * 10.0)) + 10000
+    encoded_alt = max(0, min(0x7FFF, encoded_alt))
+
+    # CRSF vertical speed is signed cm/s, positive = climb.
+    vs_cms = int(round(vertical_speed_mps * 100.0))
+    vs_cms = max(-32768, min(32767, vs_cms))
+    vs_u16 = vs_cms & 0xFFFF
+
+    body = bytes([
+        0x09,
+        (encoded_alt >> 8) & 0xFF,
+        encoded_alt & 0xFF,
+        (vs_u16 >> 8) & 0xFF,
+        vs_u16 & 0xFF
+    ])
+
+    return bytes([0xC8, 0x06]) + body + bytes([crsf_crc(body)])
+
+
+def process_mavlink():
+    global mav_buffer
+    global mav_relative_alt_m
+    global mav_vertical_speed_mps
+    global mav_alt_count
+
+    waiting = mav_uart.any()
+
+    if waiting:
+        data = mav_uart.read(waiting)
+
+        if data:
+            mav_buffer.extend(data)
+
+    while len(mav_buffer) >= 8:
+
+        # Resynchronise to MAVLink 1 (0xFE) or MAVLink 2 (0xFD).
+        if mav_buffer[0] not in (0xFE, 0xFD):
+            mav_buffer = mav_buffer[1:]
+            continue
+
+        stx = mav_buffer[0]
+        payload_len = mav_buffer[1]
+
+        if stx == 0xFE:
+            # MAVLink 1:
+            # STX LEN SEQ SYS COMP MSGID PAYLOAD CRC(2)
+            frame_len = payload_len + 8
+
+            if len(mav_buffer) < frame_len:
+                return
+
+            msg_id = mav_buffer[5]
+            payload_start = 6
+
+        else:
+            # MAVLink 2:
+            # STX LEN incompat compat SEQ SYS COMP MSGID(3) PAYLOAD CRC(2)
+            # plus optional 13-byte signature when incompatibility bit 0 is set.
+            signed = bool(mav_buffer[2] & 0x01)
+            frame_len = payload_len + 12 + (13 if signed else 0)
+
+            if len(mav_buffer) < frame_len:
+                return
+
+            msg_id = (
+                mav_buffer[7]
+                | (mav_buffer[8] << 8)
+                | (mav_buffer[9] << 16)
+            )
+            payload_start = 10
+
+        frame = bytes(mav_buffer[:frame_len])
+        mav_buffer = mav_buffer[frame_len:]
+
+        # LOCAL_POSITION_NED has a 28-byte payload.
+        if msg_id == 32 and payload_len >= 28:
+            z = struct.unpack_from("<f", frame, payload_start + 12)[0]
+            vz = struct.unpack_from("<f", frame, payload_start + 24)[0]
+
+            # MAVLink LOCAL_POSITION_NED is NED: positive Z/VZ are downward.
+            mav_relative_alt_m = -z
+            mav_vertical_speed_mps = -vz
+            mav_alt_count += 1
+
+            # Inject/update synthetic CRSF BARO_ALT in the same cache
+            # used by the existing radio telemetry scheduler.
+            fc_latest_frames[0x09] = make_crsf_baro_altitude(
+                mav_relative_alt_m,
+                mav_vertical_speed_mps
+            )
+
+
+# ============================================================
 # CRSF
 # ============================================================
 
@@ -873,6 +1015,7 @@ print(
     TELEMETRY_REPLY_DELAY_MS,
     "ms"
 )
+print("MAVLink RX: GP1 @ 115200 baud | source: LOCAL_POSITION_NED (32)")
 print(
     "SX1262 TX power: 14 dBm"
 )
@@ -898,6 +1041,9 @@ last_status = time.ticks_ms()
 previous_packet_time = 0
 
 while True:
+
+    # Read PX4 MAVLink relative altitude from GP1 / UART0.
+    process_mavlink()
 
     # Read and display any CRSF telemetry/traffic sent by the FC.
     process_fc_uart()
@@ -1018,7 +1164,13 @@ while True:
             "| Telemetry types:",
             len(fc_latest_frames),
             "| Failsafe:",
-            failsafe
+            failsafe,
+            "| MAV alt:",
+            ("%.2f m" % mav_relative_alt_m) if mav_relative_alt_m is not None else "---",
+            "| MAV VSpd:",
+            ("%.2f m/s" % mav_vertical_speed_mps) if mav_vertical_speed_mps is not None else "---",
+            "| MAV alt frames:",
+            mav_alt_count
         )
 
         last_status = now
