@@ -25,6 +25,8 @@ import time
 # SETTINGS
 # ============================================================
 FREQUENCY = 868000000
+TX_POWER_DBM = 22  # SX1262 requested TX power, dBm (up to +22 dBm)
+CRSF_ADDRESS = 0xC8  # CRSF destination/device address used by this link
 FC_BAUD = 420000
 MAVLINK_BAUD = 115200
 LINK_TIMEOUT_MS = 1000
@@ -298,7 +300,7 @@ def configure_radio():
     command(
         0x8E,
         bytes([
-            14,
+            TX_POWER_DBM,
             0x04
         ])
     )
@@ -641,7 +643,7 @@ def make_crsf_baro_altitude(relative_alt_m, vertical_speed_mps):
         vs_u16 & 0xFF
     ])
 
-    return bytes([0xC8, 0x06]) + body + bytes([crsf_crc(body)])
+    return bytes([CRSF_ADDRESS, 0x06]) + body + bytes([crsf_crc(body)])
 
 
 def process_mavlink():
