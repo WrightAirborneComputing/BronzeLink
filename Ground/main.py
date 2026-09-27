@@ -40,6 +40,7 @@ UART_BAUD = 115200
 # Maximum radio transmission rate.
 # This avoids building up old control frames.
 RADIO_INTERVAL_MS = 40       # requested maximum uplink rate
+RX_LED_TIMEOUT_MS = 1000        # LED off after 1 s without valid air->ground packet
 
 
 # ============================================================
@@ -77,6 +78,10 @@ CS = Pin(3, Pin.OUT, value=1)
 BUSY = Pin(2, Pin.IN)
 RESET = Pin(15, Pin.OUT, value=1)
 DIO1 = Pin(20, Pin.IN)
+
+# Pico onboard LED: ON while valid air->ground packets are being received.
+LED = Pin("LED", Pin.OUT)
+LED.value(0)
 
 
 # ============================================================
@@ -775,6 +780,8 @@ valid_count = 0
 telemetry_rx_count = 0
 telemetry_bad_count = 0
 
+last_telemetry_rx_time = time.ticks_ms()
+
 last_tx_time = time.ticks_ms()
 
 last_report = time.ticks_ms()
@@ -843,6 +850,8 @@ while True:
         if valid_crsf_any(telemetry):
 
             telemetry_rx_count += 1
+            last_telemetry_rx_time = time.ticks_ms()
+            LED.value(1)
 
             # Pass the original CRSF frame unchanged to Pico 2W.
             uart.write(telemetry)
@@ -889,10 +898,21 @@ while True:
 
 
     # --------------------------------------------------------
-    # Status once per second
+    # RX LED timeout
     # --------------------------------------------------------
 
     now = time.ticks_ms()
+
+    if time.ticks_diff(
+        now,
+        last_telemetry_rx_time
+    ) > RX_LED_TIMEOUT_MS:
+        LED.value(0)
+
+    # --------------------------------------------------------
+    # Status once per second
+    # --------------------------------------------------------
+
 
     if time.ticks_diff(
         now,
@@ -914,3 +934,4 @@ while True:
 
 
     time.sleep_ms(1)
+
