@@ -652,6 +652,36 @@ def process_telemetry_uart():
 
 
 # ============================================================
+# PWM MICROSECONDS -> CRSF CHANNEL VALUE
+# ============================================================
+
+def pwm_to_crsf(pwm_us):
+    """Convert a conventional 1000-2000 us RC position to CRSF units.
+
+    Mapping:
+        1000 us -> CRSF_MIN (172)
+        1500 us -> CRSF_MID (992)
+        2000 us -> CRSF_MAX (1811)
+    """
+    pwm_us = max(1000, min(2000, pwm_us))
+
+    if pwm_us <= 1500:
+        return round(
+            CRSF_MIN
+            + (pwm_us - 1000)
+            * (CRSF_MID - CRSF_MIN)
+            / 500
+        )
+
+    return round(
+        CRSF_MID
+        + (pwm_us - 1500)
+        * (CRSF_MAX - CRSF_MID)
+        / 500
+    )
+
+
+# ============================================================
 # CREATE CRSF 0x16 FRAME
 # 16 channels x 11 bits = 22 bytes
 # C8 18 16 [22 bytes] CRC
@@ -699,7 +729,21 @@ def make_crsf_frame(channels):
 # TURTLE BEACH INPUT REPORT -> 16 CRSF CHANNELS
 # ============================================================
 
+# Latched selector states. These retain their selected values after
+# the handset buttons are released.
+channel_5_latched = CRSF_MIN
+channel_6_latched = CRSF_MIN
+
+# Previous shoulder states are used so CH5 responds only to a new press.
+# Releasing either shoulder never changes the latched CH5 value.
+previous_left_shoulder = False
+previous_right_shoulder = False
+
 def decode_report(data):
+    global channel_5_latched
+    global channel_6_latched
+    global previous_left_shoulder
+    global previous_right_shoulder
     # Xbox GIP input packet is currently 36 bytes.
     if len(data) < 19:
         return None
@@ -784,24 +828,65 @@ def decode_report(data):
     #   Yaw        not inverted
     # --------------------------------------------------------
 
+    # --------------------------------------------------------
+    # Latched selector channels
+    # --------------------------------------------------------
+    #
+    # CH5 (PWM-equivalent positions):
+    #   new press of LB or RB -> select 1000 us
+    #   press second shoulder while first is held -> select 2000 us
+    #   release either/both -> retain selected value
+    #
+    # Using rising edges is important here. After both shoulders have
+    # selected 2000 us, releasing one leaves the other physically held;
+    # that release must NOT be interpreted as a new 1000 us selection.
+    #
+    # CH6 (PWM-equivalent positions):
+    #   Y -> select 1000 us
+    #   X -> select 1200 us
+    #   B -> select 1400 us
+    #   A -> select 1600 us
+    #   release -> retain selected value
+    # --------------------------------------------------------
+
+    left_pressed = left_shoulder and not previous_left_shoulder
+    right_pressed = right_shoulder and not previous_right_shoulder
+
+    if (left_pressed and right_shoulder) or (right_pressed and left_shoulder):
+        channel_5_latched = pwm_to_crsf(2000)
+    elif left_pressed or right_pressed:
+        channel_5_latched = pwm_to_crsf(1000)
+
+    previous_left_shoulder = left_shoulder
+    previous_right_shoulder = right_shoulder
+
+    if button_y:
+        channel_6_latched = pwm_to_crsf(1000)
+    if button_x:
+        channel_6_latched = pwm_to_crsf(1200)
+    if button_b:
+        channel_6_latched = pwm_to_crsf(1400)
+    if button_a:
+        channel_6_latched = pwm_to_crsf(1600)
+
     channels = [
         stick_to_crsf(right_x, False),     # CH1 Roll
         stick_to_crsf(right_y, True),      # CH2 Pitch
         stick_to_crsf(left_y, True),       # CH3 Throttle
         stick_to_crsf(left_x, False),      # CH4 Yaw
 
-        CRSF_MAX if top_right else CRSF_MIN,        # CH5 Menu / Start
-        CRSF_MAX if top_left else CRSF_MIN,         # CH6 View / Select
-        CRSF_MAX if left_shoulder else CRSF_MIN,    # CH7 LB
-        CRSF_MAX if right_shoulder else CRSF_MIN,   # CH8 RB
+        channel_5_latched,                          # CH5 latched shoulder selector
+        channel_6_latched,                          # CH6 latched face-button selector
+        CRSF_MIN,                                   # CH7 unused
+        CRSF_MIN,                                   # CH8 unused
 
         trigger_to_crsf(left_trigger),              # CH9 LT analogue
         trigger_to_crsf(right_trigger),             # CH10 RT analogue
 
-        CRSF_MAX if button_y else CRSF_MIN,          # CH11 Y / Triangle
-        CRSF_MAX if button_b else CRSF_MIN,          # CH12 B / Circle
-        CRSF_MAX if button_a else CRSF_MIN,          # CH13 A / Cross
-        CRSF_MAX if button_x else CRSF_MIN,          # CH14 X / Square
+        CRSF_MIN,                                   # CH11 spare
+        CRSF_MIN,                                   # CH12 spare
+        CRSF_MIN,                                   # CH13 spare
+        CRSF_MIN,                                   # CH14 spare
 
         CRSF_MAX if dpad_up else CRSF_MIN,           # CH15 Up
         CRSF_MAX if dpad_down else CRSF_MIN          # CH16 Down
