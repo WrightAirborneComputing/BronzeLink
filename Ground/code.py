@@ -432,6 +432,38 @@ def trigger_to_crsf(value):
 
 
 # ============================================================
+# DIFFERENTIAL TRIGGERS -> CRSF YAW
+#
+# Each trigger is 0..1023.
+#
+#   neither / equal triggers -> centre yaw
+#   right trigger > left     -> positive yaw
+#   left trigger > right     -> negative yaw
+#
+# The difference therefore spans -1023..+1023 and is mapped to
+# the full CRSF yaw range.
+# ============================================================
+
+def differential_triggers_to_crsf(left_trigger, right_trigger):
+    left_trigger = clamp(left_trigger, 0, 1023)
+    right_trigger = clamp(right_trigger, 0, 1023)
+
+    difference = right_trigger - left_trigger
+
+    if difference == 0:
+        return CRSF_MID
+
+    if difference < 0:
+        return CRSF_MID + (
+            difference * (CRSF_MID - CRSF_MIN) // 1023
+        )
+
+    return CRSF_MID + (
+        difference * (CRSF_MAX - CRSF_MID) // 1023
+    )
+
+
+# ============================================================
 # CRSF CRC-8/DVB-S2
 # Polynomial 0xD5
 # ============================================================
@@ -827,7 +859,7 @@ def decode_report(data):
     #   Roll       not inverted
     #   Pitch      inverted
     #   Throttle   inverted
-    #   Yaw        not inverted
+    #   Yaw        differential triggers: RT - LT
     # --------------------------------------------------------
 
     # --------------------------------------------------------
@@ -890,15 +922,15 @@ def decode_report(data):
         stick_to_crsf(right_x, False),     # CH1 Roll
         stick_to_crsf(right_y, True),      # CH2 Pitch
         stick_to_crsf(left_y, True),       # CH3 Throttle
-        stick_to_crsf(left_x, False),      # CH4 Yaw
+        differential_triggers_to_crsf(left_trigger, right_trigger),  # CH4 Yaw
 
         channel_5_latched,                          # CH5 latched shoulder selector
         channel_6_latched,                          # CH6 latched face-button selector
         CRSF_MIN,                                   # CH7 unused
         channel_8_latched,                          # CH8 ARM latched
 
-        trigger_to_crsf(left_trigger),              # CH9 LT analogue
-        trigger_to_crsf(right_trigger),             # CH10 RT analogue
+        CRSF_MIN,                                   # CH9 unused
+        CRSF_MIN,                                   # CH10 unused
 
         CRSF_MIN,                                   # CH11 spare
         CRSF_MIN,                                   # CH12 spare
@@ -1080,4 +1112,3 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
-
