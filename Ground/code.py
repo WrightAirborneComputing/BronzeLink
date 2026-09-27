@@ -184,8 +184,8 @@ lcd_alt     = make_label("ALT: ---.- m", 4, 24, 1)
 lcd_bat     = make_label("BAT:--.-V --.-A ---%", 4, 40, 1)
 lcd_air     = make_label("AIR: --.- m/s", 4, 56, 1)
 lcd_crsf    = make_label("TX:0 RX:0 BAD:0", 4, 72, 1)
-lcd_link    = make_label("SIGNAL LOST", 4, 104, 1)
-lcd_handset = make_label("HANDSET: NOT CONNECTED", 4, 122, 1)
+lcd_link    = make_label("LINK: LOST", 4, 88, 1)
+lcd_handset = make_label("HANDSET: NOT CONNECTED", 4, 106, 1)
 
 last_lcd_update = 0.0
 LCD_UPDATE_INTERVAL = 0.20
@@ -197,6 +197,7 @@ telemetry_current_a = None
 telemetry_remaining_pct = None
 telemetry_airspeed_ms = None
 telemetry_flight_mode = None
+telemetry_rssi_dbm = None
 telemetry_heartbeat_count = 0
 last_valid_telemetry_time = None
 last_telemetry_type = None
@@ -534,6 +535,7 @@ def decode_telemetry_frame(frame):
     global telemetry_remaining_pct
     global telemetry_airspeed_ms
     global telemetry_flight_mode
+    global telemetry_rssi_dbm
     global telemetry_heartbeat_count
     global last_valid_telemetry_time
     global last_telemetry_type
@@ -569,6 +571,12 @@ def decode_telemetry_frame(frame):
     # CRSF Airspeed (0x0A): unsigned 16-bit big-endian, 0.1 m/s.
     elif frame_type == 0x0A and len(frame) >= 6:
         telemetry_airspeed_ms = be_u16(frame, 3) / 10.0
+
+    # CRSF LINK_STATISTICS (0x14).
+    # RSSI bytes are positive magnitudes: 67 represents -67 dBm.
+    # The ground radio puts its measured aircraft->ground RSSI in byte 3.
+    elif frame_type == 0x14 and len(frame) >= 14:
+        telemetry_rssi_dbm = -int(frame[3])
 
     elif frame_type == 0x21:
         # CRSF FLIGHT_MODE: zero-terminated ASCII payload.
@@ -608,8 +616,9 @@ def update_lcd(force=False):
         curr = telemetry_current_a
         remain = telemetry_remaining_pct
         air = telemetry_airspeed_ms
+        rssi = telemetry_rssi_dbm
     else:
-        alt = volt = curr = remain = air = None
+        alt = volt = curr = remain = air = rssi = None
 
     if handset_connected:
         lcd_handset.text = "HANDSET: CONNECTED"
@@ -632,7 +641,12 @@ def update_lcd(force=False):
 
     lcd_air.text = "AIR: %4.1f m/s" % air if air is not None else "AIR: --.- m/s"
     lcd_crsf.text = "TX:%d RX:%d BAD:%d" % (packet_count, telemetry_frame_count, telemetry_bad_crc_count)
-    lcd_link.text = "LINK OK" if link_ok else "SIGNAL LOST"
+    if link_ok and rssi is not None:
+        lcd_link.text = "LINK: OK  RSSI: %4d dBm" % rssi
+    elif link_ok:
+        lcd_link.text = "LINK: OK  RSSI: --- dBm"
+    else:
+        lcd_link.text = "LINK: LOST"
 
 
 def print_telemetry_frame(frame):
