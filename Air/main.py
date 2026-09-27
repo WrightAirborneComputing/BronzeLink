@@ -28,14 +28,11 @@ FREQUENCY = 868000000
 FC_BAUD = 420000
 LINK_TIMEOUT_MS = 1000
 TX_TIMEOUT_MS = 200
-TELEMETRY_TX_INTERVAL_MS = 500   # 2 Hz return telemetry
+TELEMETRY_REPLY_DELAY_MS = 20   # guard time: let ground finish TX->RX turnaround
 
 # Preferred return-telemetry rotation.
-# At 2 Hz this gives:
-#   0.0 s FLIGHT_MODE
-#   0.5 s BATTERY
-#   1.0 s GPS
-#   1.5 s FLIGHT_MODE ...
+# One frame is returned immediately after each valid RC uplink packet:
+# FLIGHT_MODE -> BATTERY -> GPS -> repeat.
 TELEMETRY_PRIORITY = (0x21, 0x08, 0x02)
 
 # ============================================================
@@ -71,7 +68,7 @@ BUSY = Pin(2, Pin.IN)
 RESET = Pin(15, Pin.OUT, value=1)
 DIO1 = Pin(20, Pin.IN)
 
-# Pico onboard LED: ON while valid ground->air CRSF packets are being received.
+# Onboard link LED: ON while valid RC packets are arriving.
 LED = Pin("LED", Pin.OUT)
 LED.value(0)
 
@@ -258,6 +255,32 @@ def configure_radio():
         bytes([
             0x00,
             0x00
+        ])
+    )
+
+    # --------------------------------------------------------
+    # PA configuration
+    #
+    # Match the known-working ground-side SX1262 configuration.
+    # --------------------------------------------------------
+    command(
+        0x95,
+        bytes([
+            0x04,
+            0x07,
+            0x00,
+            0x01
+        ])
+    )
+
+    # --------------------------------------------------------
+    # TX power = 14 dBm
+    # --------------------------------------------------------
+    command(
+        0x8E,
+        bytes([
+            14,
+            0x04
         ])
     )
 
@@ -827,7 +850,7 @@ def decode_channels(frame):
 print()
 print("==============================")
 print("AIRCRAFT PICO")
-print("CRSF 868 MHz BIDIRECTIONAL AIR RADIO")
+print("CRSF 868 MHz SYNCHRONISED AIR RADIO")
 print("==============================")
 print()
 print(
@@ -843,7 +866,15 @@ print(
 )
 print()
 print(
-    "FC RX + TX and radio return link ENABLED"
+    "Ground-master RC / delayed telemetry reply ENABLED"
+)
+print(
+    "Telemetry reply delay:",
+    TELEMETRY_REPLY_DELAY_MS,
+    "ms"
+)
+print(
+    "SX1262 TX power: 14 dBm"
 )
 print()
 
@@ -865,7 +896,6 @@ failsafe = True
 
 last_status = time.ticks_ms()
 previous_packet_time = 0
-last_telemetry_tx_time = time.ticks_ms()
 
 while True:
 
@@ -882,13 +912,11 @@ while True:
         if valid_crsf(frame):
 
             packet_count += 1
+            LED.value(1)
 
             previous_packet_time = last_packet_time
-            last_packet_time = time.ticks_ms()
+            last_packet_time = (time.ticks_ms())
             packet_ms = last_packet_time - previous_packet_time
-
-            # Valid ground->air CRSF packet received.
-            LED.value(1)
 
 
             if failsafe:
@@ -924,23 +952,18 @@ while True:
             fc_uart.write(frame)
 
             # ------------------------------------------------
-            # RETURN TELEMETRY
+            # SYNCHRONISED RETURN TELEMETRY
             #
-            # Limit air->ground telemetry radio transmissions to 2 Hz
-            # (one every 500 ms). RC reception/forwarding remains the
-            # priority. Telemetry is still sent immediately after a valid
-            # uplink packet, giving the ground radio a natural RX slot.
+            # Ground is the timing master.  Every valid RC packet opens
+            # exactly one aircraft reply slot.  Send one latest queued FC
+            # CRSF telemetry frame immediately, then transmit_radio_packet()
+            # returns the SX1262 directly to continuous RX.
             # ------------------------------------------------
-            now = time.ticks_ms()
-
-            if time.ticks_diff(
-                now,
-                last_telemetry_tx_time
-            ) >= TELEMETRY_TX_INTERVAL_MS:
-
-                if fc_latest_frames:
-                    send_one_queued_fc_frame()
-                    last_telemetry_tx_time = now
+            if fc_latest_frames:
+                # Give the ground SX1262 time to finish its TX->RX
+                # turnaround and acquire the beginning of our LoRa packet.
+                time.sleep_ms(TELEMETRY_REPLY_DELAY_MS)
+                send_one_queued_fc_frame()
 
 
     # --------------------------------------------------------
