@@ -71,6 +71,10 @@ BUSY = Pin(2, Pin.IN)
 RESET = Pin(15, Pin.OUT, value=1)
 DIO1 = Pin(20, Pin.IN)
 
+# Pico onboard LED: ON while valid ground->air CRSF packets are being received.
+LED = Pin("LED", Pin.OUT)
+LED.value(0)
+
 # ============================================================
 # LOW LEVEL
 # ============================================================
@@ -880,8 +884,11 @@ while True:
             packet_count += 1
 
             previous_packet_time = last_packet_time
-            last_packet_time = (time.ticks_ms())
+            last_packet_time = time.ticks_ms()
             packet_ms = last_packet_time - previous_packet_time
+
+            # Valid ground->air CRSF packet received.
+            LED.value(1)
 
 
             if failsafe:
@@ -951,6 +958,7 @@ while True:
         if not failsafe:
 
             failsafe = True
+            LED.value(0)
 
             print()
             print(
