@@ -18,30 +18,29 @@
 #
 # FC transmit enabled.
 # ============================================================
-
 from machine import SPI, Pin, UART
 import time
-
 
 # ============================================================
 # SETTINGS
 # ============================================================
-
 FREQUENCY = 868000000
-
 FC_BAUD = 420000
-
 LINK_TIMEOUT_MS = 1000
-
-TELEMETRY_QUEUE_MAX = 8
 TX_TIMEOUT_MS = 200
 TELEMETRY_TX_INTERVAL_MS = 500   # 2 Hz return telemetry
 
+# Preferred return-telemetry rotation.
+# At 2 Hz this gives:
+#   0.0 s FLIGHT_MODE
+#   0.5 s BATTERY
+#   1.0 s GPS
+#   1.5 s FLIGHT_MODE ...
+TELEMETRY_PRIORITY = (0x21, 0x08, 0x02)
 
 # ============================================================
 # FC UART
 # ============================================================
-
 fc_uart = UART(
     1,
     baudrate=FC_BAUD,
@@ -52,11 +51,9 @@ fc_uart = UART(
     rx=Pin(5)
 )
 
-
 # ============================================================
 # SX1262
 # ============================================================
-
 spi = SPI(
     1,
     baudrate=1000000,
@@ -74,11 +71,9 @@ BUSY = Pin(2, Pin.IN)
 RESET = Pin(15, Pin.OUT, value=1)
 DIO1 = Pin(20, Pin.IN)
 
-
 # ============================================================
 # LOW LEVEL
 # ============================================================
-
 def wait_busy():
 
     start = time.ticks_ms()
@@ -95,7 +90,6 @@ def wait_busy():
         time.sleep_ms(1)
 
     return True
-
 
 def command(opcode, data=b""):
 
@@ -116,7 +110,6 @@ def command(opcode, data=b""):
     wait_busy()
 
     return True
-
 
 def read_command(opcode, length):
 
@@ -145,21 +138,14 @@ def read_command(opcode, length):
 
     return data
 
-
 def reset_radio():
-
     print(
         "Resetting SX1262..."
     )
-
     RESET.value(0)
-
     time.sleep_ms(20)
-
     RESET.value(1)
-
     time.sleep_ms(20)
-
     wait_busy()
 
 
@@ -624,7 +610,12 @@ def valid_crsf(frame):
 # frame size is length + 2 bytes.
 
 fc_rx_buffer = bytearray()
-fc_tx_queue = []
+
+# Store only the newest FC frame of each CRSF type.  This prevents a
+# high-rate FIFO from filling with stale telemetry.
+fc_latest_frames = {}
+fc_priority_index = 0
+
 fc_radio_tx_count = 0
 fc_radio_tx_fail_count = 0
 fc_rx_frame_count = 0
@@ -660,34 +651,58 @@ def crsf_type_name(frame_type):
 
 def queue_fc_frame_for_radio(frame):
 
-    global fc_tx_queue
-
-    # Keep the newest telemetry if the FC is producing frames faster
-    # than the return radio link can carry them.
-    if len(fc_tx_queue) >= TELEMETRY_QUEUE_MAX:
-        fc_tx_queue.pop(0)
-
-    fc_tx_queue.append(frame)
+    # Keep only the newest frame of each CRSF type.
+    # A newer BATTERY frame, for example, replaces the older BATTERY frame.
+    frame_type = frame[2]
+    fc_latest_frames[frame_type] = frame
 
 
 def send_one_queued_fc_frame():
 
-    global fc_tx_queue
+    global fc_priority_index
     global fc_radio_tx_count
     global fc_radio_tx_fail_count
 
-    if not fc_tx_queue:
-        return
+    if not fc_latest_frames:
+        return False
 
-    frame = fc_tx_queue.pop(0)
+    frame = None
+    selected_type = None
+
+    # Deterministic round-robin through the display-critical telemetry:
+    # FLIGHT_MODE -> BATTERY -> GPS -> repeat.
+    #
+    # Advance through the rotation looking for a type that has actually
+    # been received from the FC.  Sending does NOT delete the latest copy,
+    # so each type remains available even if the FC updates more slowly
+    # than the 2 Hz radio return link.
+    for _ in range(len(TELEMETRY_PRIORITY)):
+        frame_type = TELEMETRY_PRIORITY[fc_priority_index]
+        fc_priority_index = (fc_priority_index + 1) % len(TELEMETRY_PRIORITY)
+
+        if frame_type in fc_latest_frames:
+            selected_type = frame_type
+            frame = fc_latest_frames[frame_type]
+            break
+
+    # If none of the preferred types exists yet, send the newest stored
+    # frame of any other type as a fallback.
+    if frame is None:
+        for frame_type in fc_latest_frames:
+            if frame_type not in TELEMETRY_PRIORITY:
+                selected_type = frame_type
+                frame = fc_latest_frames[frame_type]
+                break
+
+    if frame is None:
+        return False
 
     if transmit_radio_packet(frame):
         fc_radio_tx_count += 1
-        #print("PICO->GROUND[", fc_radio_tx_count, "] TYPE=", crsf_type_name(frame[2]))
-    else:
-        fc_radio_tx_fail_count += 1
-        #print("PICO->GROUND TX FAILED",fc_radio_tx_fail_count)
+        return True
 
+    fc_radio_tx_fail_count += 1
+    return False
 
 def print_fc_crsf_frame(frame):
 
@@ -895,53 +910,6 @@ while True:
                 rssi = 0
                 snr = 0
 
-
-            if(False):
-                print(
-                    "RX",
-                    packet_count,
-                    "| CH1",
-                    channels[0],
-                    "| CH2",
-                    channels[1],
-                    "| CH3",
-                    channels[2],
-                    "| CH4",
-                    channels[3],
-                    "| CH5",
-                    channels[4],
-                    "| CH6",
-                    channels[5],
-                    "| CH7",
-                    channels[6],
-                    "| CH8",
-                    channels[7],
-                    "| CH9",
-                    channels[8],
-                    "| CH10",
-                    channels[9],
-                    "| CH11",
-                    channels[10],
-                    "| CH12",
-                    channels[11],
-                    "| CH13",
-                    channels[12],
-                    "| CH14",
-                    channels[13],
-                    "| CH15",
-                    channels[14],
-                    "| CH16",
-                    channels[15],
-                    "| RSSI",
-                    rssi,
-                    "dBm",
-                    "| SNR",
-                    snr,
-                    "dB"
-                )
-            else:
-                print("RX",packet_count,packet_ms)
-
             # ------------------------------------------------
             # Forward valid CRSF channel frame to flight controller.
             # The frame is already a valid CRSF frame.
@@ -963,7 +931,7 @@ while True:
                 last_telemetry_tx_time
             ) >= TELEMETRY_TX_INTERVAL_MS:
 
-                if fc_tx_queue:
+                if fc_latest_frames:
                     send_one_queued_fc_frame()
                     last_telemetry_tx_time = now
 
@@ -1003,7 +971,7 @@ while True:
     if time.ticks_diff(
         now,
         last_status
-    ) >= 5000:
+    ) >= 1000:
 
         print(
             "Radio RX packets:",
@@ -1016,8 +984,8 @@ while True:
             fc_radio_tx_count,
             "| TX fail:",
             fc_radio_tx_fail_count,
-            "| TX queued:",
-            len(fc_tx_queue),
+            "| Telemetry types:",
+            len(fc_latest_frames),
             "| Failsafe:",
             failsafe
         )
@@ -1026,5 +994,3 @@ while True:
 
 
     time.sleep_ms(2)
-
-
