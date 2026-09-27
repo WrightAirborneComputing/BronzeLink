@@ -39,8 +39,9 @@ UART_BAUD = 115200
 
 # Maximum radio transmission rate.
 # This avoids building up old control frames.
-RADIO_INTERVAL_MS = 40       # requested maximum uplink rate
-RX_LED_TIMEOUT_MS = 1000        # LED off after 1 s without valid air->ground packet
+RADIO_INTERVAL_MS = 100      # 10 Hz ground-master RC slots
+TELEMETRY_REPLY_WINDOW_MS = 60  # listen for aircraft reply after RC TX
+TX_TIMEOUT_MS = 200
 
 
 # ============================================================
@@ -79,7 +80,7 @@ BUSY = Pin(2, Pin.IN)
 RESET = Pin(15, Pin.OUT, value=1)
 DIO1 = Pin(20, Pin.IN)
 
-# Pico onboard LED: ON while valid air->ground packets are being received.
+# Onboard telemetry/link LED.
 LED = Pin("LED", Pin.OUT)
 LED.value(0)
 
@@ -734,7 +735,7 @@ def send_radio_packet(data):
         if time.ticks_diff(
             time.ticks_ms(),
             start
-        ) > 1000:
+        ) > TX_TIMEOUT_MS:
 
             clear_irq()
             start_receive()
@@ -745,13 +746,75 @@ def send_radio_packet(data):
 
 
 # ============================================================
+# CRSF LINK STATISTICS FOR HANDSET RSSI DISPLAY
+# ============================================================
+
+def make_link_statistics_frame(rssi_dbm, snr_db):
+    """
+    Create a standard CRSF LINK_STATISTICS (0x14) frame.
+
+    The ground SX1262 measures the aircraft->ground packet RSSI.
+    CRSF encodes RSSI as a positive magnitude:
+        -67 dBm -> 67
+    """
+    rssi_mag = max(0, min(255, -int(round(rssi_dbm))))
+
+    # Signed SNR byte, in dB, two's-complement.
+    snr_int = max(-128, min(127, int(round(snr_db))))
+    snr_byte = snr_int & 0xFF
+
+    payload = bytes([
+        rssi_mag,   # uplink RSSI antenna 1
+        rssi_mag,   # uplink RSSI antenna 2
+        100,        # uplink link quality
+        snr_byte,   # uplink SNR
+        0,          # active antenna
+        0,          # RF mode
+        0,          # uplink TX power
+        rssi_mag,   # downlink RSSI
+        100,        # downlink link quality
+        snr_byte    # downlink SNR
+    ])
+
+    body = bytes([0x14]) + payload
+    crc = crsf_crc(body)
+
+    return bytes([
+        0xC8,
+        len(body) + 1
+    ]) + body + bytes([crc])
+
+
+# ============================================================
+# SYNCHRONISED TELEMETRY REPLY WINDOW
+# ============================================================
+
+def receive_telemetry_reply(timeout_ms):
+    # send_radio_packet() has already returned the radio to continuous RX.
+    # Wait only inside the aircraft's defined reply slot.  This prevents an
+    # asynchronous aircraft transmission from colliding with a later RC slot.
+    start = time.ticks_ms()
+
+    while time.ticks_diff(time.ticks_ms(), start) < timeout_ms:
+
+        telemetry, telemetry_status = receive_radio_packet()
+
+        if telemetry is not None:
+            return telemetry, telemetry_status
+
+        time.sleep_ms(1)
+
+    return None, None
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 print()
 print("==============================")
 print("GROUND PICO")
-print("CRSF <-> 868 MHz")
+print("CRSF 868 MHz SYNCHRONISED GROUND MASTER")
 print("==============================")
 print()
 print("UART:")
@@ -769,7 +832,9 @@ reset_radio()
 configure_radio()
 
 
-print("Waiting for CRSF frames; telemetry return enabled...")
+print("Ground-master 10 Hz RC; delayed aircraft reply enabled...")
+print("RC slot:", RADIO_INTERVAL_MS, "ms")
+print("Telemetry reply window:", TELEMETRY_REPLY_WINDOW_MS, "ms")
 print()
 
 
@@ -779,10 +844,9 @@ tx_count = 0
 valid_count = 0
 telemetry_rx_count = 0
 telemetry_bad_count = 0
-
 last_telemetry_rx_time = time.ticks_ms()
 
-last_tx_time = time.ticks_ms()
+next_tx_time = time.ticks_add(time.ticks_ms(), RADIO_INTERVAL_MS)
 
 last_report = time.ticks_ms()
 
@@ -804,10 +868,12 @@ while True:
 
     if latest_frame is not None:
 
+        # Absolute slot scheduler: the reply window does NOT get added
+        # to the RC period.  A new RC slot is due every 100 ms.
         if time.ticks_diff(
             now,
-            last_tx_time
-        ) >= RADIO_INTERVAL_MS:
+            next_tx_time
+        ) >= 0:
 
             frame_to_send = latest_frame
 
@@ -821,10 +887,62 @@ while True:
                 tx_count += 1
                 valid_count += 1
 
-                # Do not block here waiting for telemetry.
-                # send_radio_packet() has already returned the SX1262 to
-                # continuous RX.  Airside telemetry is now only sent at
-                # 2 Hz, so it is collected non-blockingly in the main loop.
+                # The aircraft is permitted to transmit only now, directly
+                # after receiving this RC packet.  Listen for that one reply
+                # before returning to the next ground-master RC slot.
+                telemetry, telemetry_status = receive_telemetry_reply(
+                    TELEMETRY_REPLY_WINDOW_MS
+                )
+
+                if telemetry is not None:
+
+                    if valid_crsf_any(telemetry):
+
+                        telemetry_rx_count += 1
+                        last_telemetry_rx_time = time.ticks_ms()
+                        LED.value(1)
+
+                        # Pass the original CRSF frame unchanged to Pico 2W.
+                        uart.write(telemetry)
+
+                        frame_type = telemetry[2]
+
+                        if telemetry_status is not None:
+                            trssi, tsnr, _ = telemetry_status
+
+                            # Follow it with a standard CRSF LINK_STATISTICS
+                            # frame containing the RSSI measured here at ground.
+                            uart.write(
+                                make_link_statistics_frame(
+                                    trssi,
+                                    tsnr
+                                )
+                            )
+                            print(
+                                "AIR->GROUND",
+                                telemetry_rx_count,
+                                "| TYPE 0x%02X" % frame_type,
+                                crsf_type_name(frame_type),
+                                "| LEN",
+                                len(telemetry),
+                                "| RSSI",
+                                trssi,
+                                "dBm | SNR",
+                                tsnr,
+                                "dB"
+                            )
+                        else:
+                            print(
+                                "AIR->GROUND",
+                                telemetry_rx_count,
+                                "| TYPE 0x%02X" % frame_type,
+                                crsf_type_name(frame_type),
+                                "| LEN",
+                                len(telemetry)
+                            )
+
+                    else:
+                        telemetry_bad_count += 1
 
             else:
 
@@ -832,87 +950,35 @@ while True:
                     "RADIO TX FAILED"
                 )
 
-            last_tx_time = time.ticks_ms()
-
-
-    # --------------------------------------------------------
-    # Non-blocking air->ground telemetry collection.
-    #
-    # The SX1262 is in continuous RX between RC uplinks.  Poll for a
-    # returned CRSF frame, but never wait for one.  This means telemetry
-    # cannot delay the next RC transmit deadline.
-    # --------------------------------------------------------
-
-    telemetry, telemetry_status = receive_radio_packet()
-
-    if telemetry is not None:
-
-        if valid_crsf_any(telemetry):
-
-            telemetry_rx_count += 1
-            last_telemetry_rx_time = time.ticks_ms()
-            LED.value(1)
-
-            # Pass the original CRSF frame unchanged to Pico 2W.
-            uart.write(telemetry)
-
-            frame_type = telemetry[2]
-
-            if telemetry_status is not None:
-                trssi, tsnr, _ = telemetry_status
-                print(
-                    "AIR->GROUND",
-                    telemetry_rx_count,
-                    "| TYPE 0x%02X" % frame_type,
-                    crsf_type_name(frame_type),
-                    "| LEN",
-                    len(telemetry),
-                    "| RSSI",
-                    trssi,
-                    "dBm | SNR",
-                    tsnr,
-                    "dB"
-                )
-            else:
-                print(
-                    "AIR->GROUND",
-                    telemetry_rx_count,
-                    "| TYPE 0x%02X" % frame_type,
-                    crsf_type_name(frame_type),
-                    "| LEN",
-                    len(telemetry)
-                )
-
-        else:
-
-            telemetry_bad_count += 1
-
-            print(
-                "BAD RETURN PACKET",
-                telemetry_bad_count,
-                "| LEN",
-                len(telemetry),
-                "|",
-                " ".join("%02X" % b for b in telemetry)
+            # Advance from the scheduled slot, not from the end of the
+            # telemetry receive window.  This prevents cadence drift.
+            next_tx_time = time.ticks_add(
+                next_tx_time,
+                RADIO_INTERVAL_MS
             )
 
+            # If execution was delayed by more than a complete slot,
+            # skip stale slots rather than sending a burst of old RC frames.
+            now_after_slot = time.ticks_ms()
+            while time.ticks_diff(now_after_slot, next_tx_time) >= 0:
+                next_tx_time = time.ticks_add(
+                    next_tx_time,
+                    RADIO_INTERVAL_MS
+                )
 
-    # --------------------------------------------------------
-    # RX LED timeout
-    # --------------------------------------------------------
 
-    now = time.ticks_ms()
-
+    # Link LED follows valid returned telemetry.
     if time.ticks_diff(
-        now,
+        time.ticks_ms(),
         last_telemetry_rx_time
-    ) > RX_LED_TIMEOUT_MS:
+    ) > 1000:
         LED.value(0)
 
     # --------------------------------------------------------
     # Status once per second
     # --------------------------------------------------------
 
+    now = time.ticks_ms()
 
     if time.ticks_diff(
         now,
@@ -927,7 +993,10 @@ while True:
             "| TELEM bad:",
             telemetry_bad_count,
             "| UART buffer:",
-            len(rx_buffer)
+            len(rx_buffer),
+            "| slot:",
+            RADIO_INTERVAL_MS,
+            "ms"
         )
 
         last_report = now
