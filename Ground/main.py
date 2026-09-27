@@ -34,6 +34,8 @@ import time
 # ============================================================
 
 FREQUENCY = 868000000
+TX_POWER_DBM = 22  # SX1262 requested TX power, dBm (up to +22 dBm)
+CRSF_ADDRESS = 0xC8  # CRSF destination/device address used by this link
 
 UART_BAUD = 115200
 
@@ -482,7 +484,7 @@ def configure_radio():
     command(
         0x8E,
         bytes([
-            14,
+            TX_POWER_DBM,
             0x04
         ])
     )
@@ -780,7 +782,7 @@ def make_link_statistics_frame(rssi_dbm, snr_db):
     crc = crsf_crc(body)
 
     return bytes([
-        0xC8,
+        CRSF_ADDRESS,
         len(body) + 1
     ]) + body + bytes([crc])
 
