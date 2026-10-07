@@ -83,6 +83,18 @@ CRSF_MAX = 1811
 # Send the latest channel state to the radio Pico at a fixed 25 Hz.
 CRSF_TX_INTERVAL = 0.1
 
+# USB/GIP automatic recovery.
+# Normal startup is tried first. If no valid 0x20 controller report arrives,
+# cycle USB configuration 1 -> 0 -> 1 and re-run the GIP handshake.
+USB_GIP_STARTUP_TIMEOUT = 0.75
+USB_GIP_UNCONFIGURED_TIME = 0.25
+USB_GIP_MAX_RECOVERY_ATTEMPTS = 10
+
+usb_gip_last_init_time = None
+usb_gip_recovery_attempts = 0
+usb_gip_recovery_done = False
+
+
 # Small centre deadband for the Hall sticks.
 # Raw stick range is approximately -32768..+32767.
 STICK_DEADZONE = 1000
@@ -310,11 +322,123 @@ def initialise_gip(dev):
 
 
 # ============================================================
+# USB/GIP AUTOMATIC RECOVERY
+# ============================================================
+
+USB_REQ_SET_CONFIGURATION = 0x09
+
+
+def usb_set_configuration_control(dev, configuration_value):
+    """Send a standard USB SET_CONFIGURATION request."""
+    try:
+        dev.ctrl_transfer(
+            0x00,                       # Host-to-device, Standard, Device
+            USB_REQ_SET_CONFIGURATION,
+            configuration_value,
+            0,
+            None,
+            timeout=1000
+        )
+        return True
+
+    except Exception as e:
+        print(
+            "USB SET_CONFIGURATION(%d) failed: %r"
+            % (configuration_value, e)
+        )
+        return False
+
+
+def recover_gip_usb_state():
+    """
+    Recover a controller which enumerated/configured correctly but remains
+    silent on the GIP interrupt endpoint.
+
+    The Turtle Beach controller has been observed to recover reliably after:
+        SET_CONFIGURATION(0)
+        wait
+        SET_CONFIGURATION(1)
+        normal GIP initialisation
+    """
+    global usb_gip_last_init_time
+    global usb_gip_recovery_attempts
+
+    if device is None:
+        return False
+
+    usb_gip_recovery_attempts += 1
+
+    print(
+        "GIP silent - USB recovery attempt %d/%d"
+        % (usb_gip_recovery_attempts, USB_GIP_MAX_RECOVERY_ATTEMPTS)
+    )
+
+    if not usb_set_configuration_control(device, 0):
+        return False
+
+    time.sleep(USB_GIP_UNCONFIGURED_TIME)
+
+    if not usb_set_configuration_control(device, 1):
+        return False
+
+    # Allow the newly configured interrupt endpoints to settle.
+    time.sleep(0.05)
+
+    initialise_gip(device)
+    usb_gip_last_init_time = time.monotonic()
+
+    return True
+
+
+def service_gip_recovery():
+    global usb_gip_recovery_done
+
+    if usb_gip_recovery_done:
+        return
+
+    if device is None or not handset_usb_found:
+        return
+
+    # handset_connected is set only after decode_report() accepts a 0x20
+    # controller input packet.
+    if handset_connected:
+        if usb_gip_recovery_attempts:
+            print(
+                "GIP active after %d USB recovery attempt(s)"
+                % usb_gip_recovery_attempts
+            )
+        usb_gip_recovery_done = True
+        return
+
+    if usb_gip_last_init_time is None:
+        return
+
+    if (
+        time.monotonic() - usb_gip_last_init_time
+        < USB_GIP_STARTUP_TIMEOUT
+    ):
+        return
+
+    if usb_gip_recovery_attempts >= USB_GIP_MAX_RECOVERY_ATTEMPTS:
+        print(
+            "GIP recovery stopped after %d attempts"
+            % usb_gip_recovery_attempts
+        )
+        usb_gip_recovery_done = True
+        return
+
+    recover_gip_usb_state()
+
+
+# ============================================================
 # FIND CONTROLLER
 # ============================================================
 
 def find_controller():
     global device
+    global usb_gip_last_init_time
+    global usb_gip_recovery_attempts
+    global usb_gip_recovery_done
     global handset_usb_found
     global handset_connected
 
@@ -347,6 +471,11 @@ def find_controller():
         print("set_configuration:", repr(e))
 
     initialise_gip(dev)
+
+    # Arm automatic recovery. A valid 0x20 report will cancel it.
+    usb_gip_last_init_time = time.monotonic()
+    usb_gip_recovery_attempts = 0
+    usb_gip_recovery_done = False
 
     device = dev
     handset_usb_found = True
@@ -430,6 +559,7 @@ def trigger_to_crsf(value):
     return CRSF_MIN + (
         value * (CRSF_MAX - CRSF_MIN) // 1023
     )
+
 
 
 # ============================================================
@@ -856,7 +986,7 @@ def decode_report(data):
     #   Roll       not inverted
     #   Pitch      inverted
     #   Throttle   inverted
-    #   Yaw        differential triggers: RT - LT
+    #   Yaw        not inverted (left stick X)
     # --------------------------------------------------------
 
     # --------------------------------------------------------
@@ -918,8 +1048,8 @@ def decode_report(data):
     channels = [
         stick_to_crsf(right_x, False),     # CH1 Roll
         stick_to_crsf(right_y, True),      # CH2 Pitch
-        stick_to_crsf(left_y,  True),      # CH3 Throttle
-        stick_to_crsf(left_x,  False),     # CH4 Yaw
+        stick_to_crsf(left_y, True),       # CH3 Throttle
+        stick_to_crsf(left_x, False),          # CH4 Yaw
 
         channel_5_latched,                          # CH5 latched shoulder selector
         channel_6_latched,                          # CH6 latched face-button selector
@@ -986,6 +1116,7 @@ while True:
 
     process_telemetry_uart()
     update_lcd()
+    service_gip_recovery()
 
     # --------------------------------------------------------
     # Find / reconnect controller
@@ -1109,3 +1240,5 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
+
