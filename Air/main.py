@@ -40,6 +40,7 @@ TELEMETRY_PRIORITY = (
     0x21,  # FLIGHT_MODE
     0x08,  # BATTERY
     0x09,  # BARO_ALT (generated from MAVLink LOCAL_POSITION_NED)
+    0x7A,  # CUSTOM horizontal distance from home (metres, uint32 BE)
 )
 
 # ============================================================
@@ -617,11 +618,15 @@ def receive_packet():
 # ============================================================
 
 import struct
+import math
 
 mav_buffer = bytearray()
 mav_relative_alt_m = None
 mav_vertical_speed_mps = None
 mav_alt_count = 0
+mav_local_xy = None
+mav_home_xy = None
+mav_home_distance_m = None
 
 
 def make_crsf_baro_altitude(relative_alt_m, vertical_speed_mps):
@@ -646,11 +651,31 @@ def make_crsf_baro_altitude(relative_alt_m, vertical_speed_mps):
     return bytes([CRSF_ADDRESS, 0x06]) + body + bytes([crsf_crc(body)])
 
 
+def make_crsf_home_distance(distance_m):
+    # Private CRSF type 0x7A: uint32 horizontal metres, big endian.
+    metres = max(0, min(0xFFFFFFFF, int(round(distance_m))))
+    body = bytes([0x7A, (metres >> 24) & 255, (metres >> 16) & 255,
+                  (metres >> 8) & 255, metres & 255])
+    return bytes([CRSF_ADDRESS, len(body) + 1]) + body + bytes([crsf_crc(body)])
+
+
+def update_home_distance():
+    global mav_home_distance_m
+    if mav_local_xy is None or mav_home_xy is None:
+        return
+    dx = mav_local_xy[0] - mav_home_xy[0]
+    dy = mav_local_xy[1] - mav_home_xy[1]
+    mav_home_distance_m = math.sqrt(dx * dx + dy * dy)
+    fc_latest_frames[0x7A] = make_crsf_home_distance(mav_home_distance_m)
+
+
 def process_mavlink():
     global mav_buffer
     global mav_relative_alt_m
     global mav_vertical_speed_mps
     global mav_alt_count
+    global mav_local_xy
+    global mav_home_xy
 
     waiting = mav_uart.any()
 
@@ -703,6 +728,10 @@ def process_mavlink():
 
         # LOCAL_POSITION_NED has a 28-byte payload.
         if msg_id == 32 and payload_len >= 28:
+            x = struct.unpack_from("<f", frame, payload_start + 4)[0]
+            y = struct.unpack_from("<f", frame, payload_start + 8)[0]
+            mav_local_xy = (x, y)
+            update_home_distance()
             z = struct.unpack_from("<f", frame, payload_start + 12)[0]
             vz = struct.unpack_from("<f", frame, payload_start + 24)[0]
 
@@ -717,6 +746,14 @@ def process_mavlink():
                 mav_relative_alt_m,
                 mav_vertical_speed_mps
             )
+
+        # HOME_POSITION (242): x,y,z are floats at payload offsets 12,16,20.
+        # Requires PX4 to stream HOME_POSITION on this MAVLink UART.
+        elif msg_id == 242 and payload_len >= 52:
+            hx = struct.unpack_from("<f", frame, payload_start + 12)[0]
+            hy = struct.unpack_from("<f", frame, payload_start + 16)[0]
+            mav_home_xy = (hx, hy)
+            update_home_distance()
 
 
 # ============================================================
