@@ -204,6 +204,7 @@ LCD_UPDATE_INTERVAL = 0.20
 TELEMETRY_SIGNAL_TIMEOUT = 1.0
 
 telemetry_altitude_m = None
+telemetry_home_distance_m = None
 telemetry_voltage_v = None
 telemetry_current_a = None
 telemetry_remaining_pct = None
@@ -628,6 +629,7 @@ def be_u24(data, offset):
 
 def decode_telemetry_frame(frame):
     global telemetry_altitude_m
+    global telemetry_home_distance_m
     global telemetry_voltage_v
     global telemetry_current_a
     global telemetry_remaining_pct
@@ -652,6 +654,12 @@ def decode_telemetry_frame(frame):
         telemetry_altitude_m = float(be_u16(frame, 15) - 1000)
 
     # CRSF Battery (0x08): voltage 0.1 V, current 0.1 A, capacity u24 mAh.
+    elif frame_type == 0x7A and len(frame) >= 8:
+        telemetry_home_distance_m = (
+            (frame[3] << 24) | (frame[4] << 16) |
+            (frame[5] << 8) | frame[6]
+        )
+
     elif frame_type == 0x08 and len(frame) >= 12:
         telemetry_voltage_v = be_u16(frame, 3) / 10.0
         telemetry_current_a = be_u16(frame, 5) / 10.0
@@ -737,7 +745,9 @@ def update_lcd(force=False):
     else:
         lcd_bat.text = "BAT:--.-V --.-A ---%"
 
-    lcd_air.text = "AIR: %4.1f m/s" % air if air is not None else "AIR: --.- m/s"
+    # The existing AIR line now shows horizontal distance from home.
+    home = telemetry_home_distance_m if link_ok else None
+    lcd_air.text = "HOME: %d m" % home if home is not None else "HOME: --- m"
     lcd_crsf.text = "TX:%d RX:%d BAD:%d" % (packet_count, telemetry_frame_count, telemetry_bad_crc_count)
     if link_ok and rssi is not None:
         lcd_link.text = "LINK: OK  RSSI: %4d dBm" % rssi
