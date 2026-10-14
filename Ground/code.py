@@ -151,7 +151,7 @@ lcd_backlight.value = True
 lcd_button = digitalio.DigitalInOut(board.GP19)
 lcd_button.direction = digitalio.Direction.INPUT
 lcd_button.pull = digitalio.Pull.UP
-lcd_page = 0  # 0=home distance, 1=latitude, 2=longitude, 3=heading
+lcd_page = 0  # 0=home distance, 1=GPS lat/lon, 2=heading
 lcd_button_last_raw = lcd_button.value
 lcd_button_stable = lcd_button_last_raw
 lcd_button_change_time = time.monotonic()
@@ -283,7 +283,7 @@ def service_lcd_button():
     if raw != lcd_button_stable and now - lcd_button_change_time >= LCD_BUTTON_DEBOUNCE:
         lcd_button_stable = raw
         if not raw:  # one action on each debounced press, not release
-            lcd_page = (lcd_page + 1) % 4
+            lcd_page = (lcd_page + 1) % 3
             update_lcd(force=True)
 
 
@@ -786,11 +786,10 @@ def update_lcd(force=False):
     if phase == 0:
         lcd_air.text = "HOME: %d m" % home if home is not None else "HOME: --- m"
     elif phase == 1:
-        lcd_air.text = ("LAT: %.6f" % telemetry_gps_lat
-                        if link_ok and telemetry_gps_lat is not None else "LAT: ---")
-    elif phase == 2:
-        lcd_air.text = ("LON: %.6f" % telemetry_gps_lon
-                        if link_ok and telemetry_gps_lon is not None else "LON: ---")
+        if link_ok and telemetry_gps_lat is not None and telemetry_gps_lon is not None:
+            lcd_air.text = "GPS: %.6f, %.6f" % (telemetry_gps_lat, telemetry_gps_lon)
+        else:
+            lcd_air.text = "GPS: ---, ---"
     else:
         lcd_air.text = ("HDG: %05.1f deg" % telemetry_gps_heading_deg
                         if link_ok and telemetry_gps_heading_deg is not None else "HDG: ---")
