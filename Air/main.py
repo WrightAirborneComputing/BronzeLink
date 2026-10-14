@@ -25,7 +25,7 @@ import time
 # SETTINGS
 # ============================================================
 FREQUENCY = 868000000
-TX_POWER_DBM = 22  # SX1262 requested TX power, dBm (up to +22 dBm)
+TX_POWER_DBM = 14  # SX1262 requested TX power, dBm (up to +22 dBm)
 CRSF_ADDRESS = 0xC8  # CRSF destination/device address used by this link
 FC_BAUD = 420000
 MAVLINK_BAUD = 115200
@@ -35,12 +35,13 @@ TELEMETRY_REPLY_DELAY_MS = 20   # guard time: let ground finish TX->RX turnaroun
 
 # Preferred return-telemetry rotation.
 # One frame is returned immediately after each valid RC uplink packet:
-# FLIGHT_MODE -> BATTERY -> GPS -> repeat.
+# FLIGHT_MODE -> BATTERY -> BARO_ALT -> GPS -> HOME_GPS -> repeat.
 TELEMETRY_PRIORITY = (
     0x21,  # FLIGHT_MODE
     0x08,  # BATTERY
     0x09,  # BARO_ALT (generated from MAVLink LOCAL_POSITION_NED)
-    0x7A,  # CUSTOM horizontal distance from home (metres, uint32 BE)
+    0x02,  # GPS position with heading overwritten by MAVLink ATTITUDE yaw
+    0x7A,  # CUSTOM home GPS coordinates from MAVLink HOME_POSITION
 )
 
 # ============================================================
@@ -618,15 +619,12 @@ def receive_packet():
 # ============================================================
 
 import struct
-import math
 
 mav_buffer = bytearray()
 mav_relative_alt_m = None
 mav_vertical_speed_mps = None
 mav_alt_count = 0
-mav_local_xy = None
-mav_home_xy = None
-mav_home_distance_m = None
+mav_yaw_heading_cdeg = None  # MAVLink ATTITUDE yaw, clockwise from north
 
 
 def make_crsf_baro_altitude(relative_alt_m, vertical_speed_mps):
@@ -651,22 +649,23 @@ def make_crsf_baro_altitude(relative_alt_m, vertical_speed_mps):
     return bytes([CRSF_ADDRESS, 0x06]) + body + bytes([crsf_crc(body)])
 
 
-def make_crsf_home_distance(distance_m):
-    # Private CRSF type 0x7A: uint32 horizontal metres, big endian.
-    metres = max(0, min(0xFFFFFFFF, int(round(distance_m))))
-    body = bytes([0x7A, (metres >> 24) & 255, (metres >> 16) & 255,
-                  (metres >> 8) & 255, metres & 255])
+def make_crsf_home_coordinates(latitude_e7, longitude_e7):
+    # Private CRSF 0x7A: signed int32 latitude/longitude in degrees * 1e7,
+    # big endian. A separate packet from the FC's normal CRSF GPS 0x02.
+    body = bytes([0x7A]) + struct.pack(">ii", latitude_e7, longitude_e7)
     return bytes([CRSF_ADDRESS, len(body) + 1]) + body + bytes([crsf_crc(body)])
 
 
-def update_home_distance():
-    global mav_home_distance_m
-    if mav_local_xy is None or mav_home_xy is None:
+def apply_attitude_heading_to_gps():
+    """Replace CRSF GPS course with PX4 attitude yaw; retain all other GPS fields."""
+    gps = fc_latest_frames.get(0x02)
+    if gps is None or mav_yaw_heading_cdeg is None or len(gps) < 19:
         return
-    dx = mav_local_xy[0] - mav_home_xy[0]
-    dy = mav_local_xy[1] - mav_home_xy[1]
-    mav_home_distance_m = math.sqrt(dx * dx + dy * dy)
-    fc_latest_frames[0x7A] = make_crsf_home_distance(mav_home_distance_m)
+    updated = bytearray(gps)
+    updated[11] = (mav_yaw_heading_cdeg >> 8) & 0xFF
+    updated[12] = mav_yaw_heading_cdeg & 0xFF
+    updated[-1] = crsf_crc(updated[2:-1])
+    fc_latest_frames[0x02] = bytes(updated)
 
 
 def process_mavlink():
@@ -674,8 +673,7 @@ def process_mavlink():
     global mav_relative_alt_m
     global mav_vertical_speed_mps
     global mav_alt_count
-    global mav_local_xy
-    global mav_home_xy
+    global mav_yaw_heading_cdeg
 
     waiting = mav_uart.any()
 
@@ -728,10 +726,6 @@ def process_mavlink():
 
         # LOCAL_POSITION_NED has a 28-byte payload.
         if msg_id == 32 and payload_len >= 28:
-            x = struct.unpack_from("<f", frame, payload_start + 4)[0]
-            y = struct.unpack_from("<f", frame, payload_start + 8)[0]
-            mav_local_xy = (x, y)
-            update_home_distance()
             z = struct.unpack_from("<f", frame, payload_start + 12)[0]
             vz = struct.unpack_from("<f", frame, payload_start + 24)[0]
 
@@ -747,13 +741,24 @@ def process_mavlink():
                 mav_vertical_speed_mps
             )
 
-        # HOME_POSITION (242): x,y,z are floats at payload offsets 12,16,20.
-        # Requires PX4 to stream HOME_POSITION on this MAVLink UART.
-        elif msg_id == 242 and payload_len >= 52:
-            hx = struct.unpack_from("<f", frame, payload_start + 12)[0]
-            hy = struct.unpack_from("<f", frame, payload_start + 16)[0]
-            mav_home_xy = (hx, hy)
-            update_home_distance()
+        # ATTITUDE (30): yaw is float radians at payload offset 12.
+        # PX4 yaw uses the NED frame: 0=north, +pi/2=east.
+        elif msg_id == 30 and payload_len >= 16:
+            import math
+            yaw_rad = struct.unpack_from("<f", frame, payload_start + 12)[0]
+            if math.isfinite(yaw_rad):
+                heading_deg = (yaw_rad * (180.0 / math.pi)) % 360.0
+                mav_yaw_heading_cdeg = int(round(heading_deg * 100.0)) % 36000
+                apply_attitude_heading_to_gps()
+
+        # HOME_POSITION (242): latitude/longitude are int32 deg * 1e7
+        # at payload offsets 0 and 4. This message must be available
+        # on the MAVLink telemetry UART.
+        elif msg_id == 242 and payload_len >= 8:
+            home_lat = struct.unpack_from("<i", frame, payload_start)[0]
+            home_lon = struct.unpack_from("<i", frame, payload_start + 4)[0]
+            if -900000000 <= home_lat <= 900000000 and -1800000000 <= home_lon <= 1800000000:
+                fc_latest_frames[0x7A] = make_crsf_home_coordinates(home_lat, home_lon)
 
 
 # ============================================================
@@ -848,7 +853,7 @@ def crsf_type_name(frame_type):
         0x2C: "PARAMETER_READ",
         0x2D: "PARAMETER_WRITE",
         0x32: "COMMAND",
-        0x7A: "MSP_REQ",
+        0x7A: "HOME_GPS",
         0x7B: "MSP_RESP",
         0x7C: "MSP_WRITE",
         0x80: "DISPLAYPORT"
@@ -863,6 +868,8 @@ def queue_fc_frame_for_radio(frame):
     # A newer BATTERY frame, for example, replaces the older BATTERY frame.
     frame_type = frame[2]
     fc_latest_frames[frame_type] = frame
+    if frame_type == 0x02:
+        apply_attitude_heading_to_gps()
 
 
 def send_one_queued_fc_frame():
@@ -878,7 +885,7 @@ def send_one_queued_fc_frame():
     selected_type = None
 
     # Deterministic round-robin through the display-critical telemetry:
-    # FLIGHT_MODE -> BATTERY -> GPS -> repeat.
+    # FLIGHT_MODE -> BATTERY -> BARO_ALT -> GPS -> HOME_GPS -> repeat.
     #
     # Advance through the rotation looking for a type that has actually
     # been received from the FC.  Sending does NOT delete the latest copy,
