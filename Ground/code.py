@@ -39,11 +39,11 @@
 # ============================================================
 
 import time
+import math
 import array
 import board
 import busio
 import digitalio
-import supervisor
 import usb_host
 import usb.core
 import displayio
@@ -147,18 +147,15 @@ lcd_backlight = digitalio.DigitalInOut(board.GP13)
 lcd_backlight.direction = digitalio.Direction.OUTPUT
 lcd_backlight.value = True
 
-# LCD HAT SELECT button: GP19, active low.
-# Press after the handset has been plugged in/buzzed to perform the
-# CircuitPython soft reload that we know makes USB enumeration reliable.
-reload_button = digitalio.DigitalInOut(board.GP19)
-reload_button.direction = digitalio.Direction.INPUT
-reload_button.pull = digitalio.Pull.UP
-
-# Avoid a reload loop if SELECT is still held when code.py restarts.
-while not reload_button.value:
-    time.sleep(0.02)
-
-reload_button_armed = True
+# LCD HAT SELECT button: GP19, active low. One press advances the GPS page.
+lcd_button = digitalio.DigitalInOut(board.GP19)
+lcd_button.direction = digitalio.Direction.INPUT
+lcd_button.pull = digitalio.Pull.UP
+lcd_page = 0  # 0=home distance, 1=latitude, 2=longitude, 3=heading
+lcd_button_last_raw = lcd_button.value
+lcd_button_stable = lcd_button_last_raw
+lcd_button_change_time = time.monotonic()
+LCD_BUTTON_DEBOUNCE = 0.05
 
 lcd_bus = fourwire.FourWire(
     lcd_spi,
@@ -205,6 +202,11 @@ TELEMETRY_SIGNAL_TIMEOUT = 1.0
 
 telemetry_altitude_m = None
 telemetry_home_distance_m = None
+telemetry_gps_lat = None
+telemetry_gps_lon = None
+telemetry_gps_heading_deg = None
+telemetry_home_lat = None
+telemetry_home_lon = None
 telemetry_voltage_v = None
 telemetry_current_a = None
 telemetry_remaining_pct = None
@@ -266,29 +268,26 @@ def service_led():
 
 
 # ============================================================
-# LCD HAT SELECT -> CIRCUITPYTHON SOFT RELOAD
+# LCD HAT SELECT -> NEXT TELEMETRY PAGE
 # ============================================================
 
-def service_reload_button():
-    global reload_button_armed
+def service_lcd_button():
+    global lcd_page, lcd_button_last_raw, lcd_button_stable
+    global lcd_button_change_time
 
-    if reload_button.value:
-        reload_button_armed = True
-        return
-
-    if not reload_button_armed:
-        return
-
-    time.sleep(0.05)  # debounce
-
-    if not reload_button.value:
-        reload_button_armed = False
-        print("LCD SELECT pressed - soft reload")
-        lcd_handset.text = "HANDSET: RELOADING..."
-        time.sleep(0.10)
-        supervisor.reload()
+    raw = lcd_button.value
+    now = time.monotonic()
+    if raw != lcd_button_last_raw:
+        lcd_button_last_raw = raw
+        lcd_button_change_time = now
+    if raw != lcd_button_stable and now - lcd_button_change_time >= LCD_BUTTON_DEBOUNCE:
+        lcd_button_stable = raw
+        if not raw:  # one action on each debounced press, not release
+            lcd_page = (lcd_page + 1) % 4
+            update_lcd(force=True)
 
 
+# ============================================================
 # ============================================================
 # XBOX GIP INITIALISATION
 # ============================================================
@@ -610,7 +609,7 @@ def crsf_type_name(frame_type):
         0x2C: "PARAMETER_READ",
         0x2D: "PARAMETER_WRITE",
         0x32: "COMMAND",
-        0x7A: "MSP_REQ",
+        0x7A: "HOME_GPS",
         0x7B: "MSP_RESP",
         0x7C: "MSP_WRITE",
         0x80: "DISPLAYPORT"
@@ -627,9 +626,34 @@ def be_u24(data, offset):
     return (data[offset] << 16) | (data[offset + 1] << 8) | data[offset + 2]
 
 
+def be_i32(data, offset):
+    value = ((data[offset] << 24) | (data[offset + 1] << 16) |
+             (data[offset + 2] << 8) | data[offset + 3])
+    return value - 0x100000000 if value & 0x80000000 else value
+
+
+def update_home_distance():
+    global telemetry_home_distance_m
+    if (telemetry_gps_lat is None or telemetry_gps_lon is None or
+            telemetry_home_lat is None or telemetry_home_lon is None):
+        telemetry_home_distance_m = None
+        return
+    # Great-circle distance on the WGS84 mean-radius sphere; horizontal only.
+    lat1 = math.radians(telemetry_home_lat)
+    lat2 = math.radians(telemetry_gps_lat)
+    dlat = lat2 - lat1
+    dlon = math.radians(telemetry_gps_lon - telemetry_home_lon)
+    a = (math.sin(dlat / 2) ** 2 +
+         math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2)
+    a = max(0.0, min(1.0, a))
+    telemetry_home_distance_m = int(round(6371008.8 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))))
+
+
 def decode_telemetry_frame(frame):
     global telemetry_altitude_m
     global telemetry_home_distance_m
+    global telemetry_gps_lat, telemetry_gps_lon, telemetry_gps_heading_deg
+    global telemetry_home_lat, telemetry_home_lon
     global telemetry_voltage_v
     global telemetry_current_a
     global telemetry_remaining_pct
@@ -647,18 +671,29 @@ def decode_telemetry_frame(frame):
     last_telemetry_type = frame_type
     last_valid_telemetry_time = time.monotonic()
 
-    # CRSF GPS (0x02): payload is:
-    # lat(4), lon(4), groundspeed(2), heading(2), altitude(2), sats(1).
-    # Payload starts at complete-frame byte 3, so altitude is bytes 15..16.
-    if frame_type == 0x02 and len(frame) >= 18:
-        telemetry_altitude_m = float(be_u16(frame, 15) - 1000)
+    # CRSF GPS (0x02): lat/lon signed int32 degrees * 1e7, big endian.
+    # Use GPS only with a satellite fix; altitude continues to come from 0x09.
+    if frame_type == 0x02 and len(frame) >= 19:
+        lat = be_i32(frame, 3) / 1e7
+        lon = be_i32(frame, 7) / 1e7
+        # CRSF GPS heading/course over ground: unsigned centidegrees.
+        heading_deg = be_u16(frame, 11) / 100.0
+        sats = frame[17]
+        if sats >= 4 and -90 <= lat <= 90 and -180 <= lon <= 180:
+            telemetry_gps_lat = lat
+            telemetry_gps_lon = lon
+            telemetry_gps_heading_deg = heading_deg if heading_deg < 360.0 else None
+            update_home_distance()
+            print("GPS: %.7f, %.7f | HOME: %s" % (lat, lon, str(telemetry_home_distance_m)))
 
-    # CRSF Battery (0x08): voltage 0.1 V, current 0.1 A, capacity u24 mAh.
-    elif frame_type == 0x7A and len(frame) >= 8:
-        telemetry_home_distance_m = (
-            (frame[3] << 24) | (frame[4] << 16) |
-            (frame[5] << 8) | frame[6]
-        )
+    # Private CRSF 0x7A: home latitude/longitude int32 deg * 1e7.
+    elif frame_type == 0x7A and len(frame) >= 12:
+        lat = be_i32(frame, 3) / 1e7
+        lon = be_i32(frame, 7) / 1e7
+        if -90 <= lat <= 90 and -180 <= lon <= 180:
+            telemetry_home_lat = lat
+            telemetry_home_lon = lon
+            update_home_distance()
 
     elif frame_type == 0x08 and len(frame) >= 12:
         telemetry_voltage_v = be_u16(frame, 3) / 10.0
@@ -745,9 +780,20 @@ def update_lcd(force=False):
     else:
         lcd_bat.text = "BAT:--.-V --.-A ---%"
 
-    # The existing AIR line now shows horizontal distance from home.
+    # Selected GPS page stays visible until SELECT is pressed again.
     home = telemetry_home_distance_m if link_ok else None
-    lcd_air.text = "HOME: %d m" % home if home is not None else "HOME: --- m"
+    phase = lcd_page
+    if phase == 0:
+        lcd_air.text = "HOME: %d m" % home if home is not None else "HOME: --- m"
+    elif phase == 1:
+        lcd_air.text = ("LAT: %.6f" % telemetry_gps_lat
+                        if link_ok and telemetry_gps_lat is not None else "LAT: ---")
+    elif phase == 2:
+        lcd_air.text = ("LON: %.6f" % telemetry_gps_lon
+                        if link_ok and telemetry_gps_lon is not None else "LON: ---")
+    else:
+        lcd_air.text = ("HDG: %05.1f deg" % telemetry_gps_heading_deg
+                        if link_ok and telemetry_gps_heading_deg is not None else "HDG: ---")
     lcd_crsf.text = "TX:%d RX:%d BAD:%d" % (packet_count, telemetry_frame_count, telemetry_bad_crc_count)
     if link_ok and rssi is not None:
         lcd_link.text = "LINK: OK  RSSI: %4d dBm" % rssi
@@ -1117,7 +1163,7 @@ update_lcd(force=True)
 
 
 while True:
-    service_reload_button()
+    service_lcd_button()
     service_led()
 
     # --------------------------------------------------------
