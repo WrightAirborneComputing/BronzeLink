@@ -52,11 +52,76 @@ usb_port = usb_host.Port(board.GP2, board.GP3)
 print("USB host initialised early on GP2/GP3")
 
 import usb.core
+import wifi
+import socketpool
+import json
 import displayio
 import terminalio
 import fourwire
 from adafruit_display_text import label
 import adafruit_st7789
+
+
+# ============================================================
+# BRONZELINK WI-FI ACCESS POINT + JSON UDP TELEMETRY
+# ============================================================
+# Join BronzeLink using this password, then listen for UDP on port 14560.
+# The Pico broadcasts to the AP subnet (normally 192.168.4.255).
+WIFI_SSID = "BronzeLink"
+WIFI_PASSWORD = "password"  # Change before operational use (>= 8 chars)
+WIFI_UDP_PORT = 14560
+WIFI_TX_INTERVAL = 1.0  # seconds; independent of the RC scheduler
+WIFI_BROADCAST_IP = "192.168.4.255"
+
+wifi_socket = None
+wifi_last_tx = time.monotonic()
+wifi_tx_count = 0
+wifi_tx_errors = 0
+
+try:
+    wifi.radio.start_ap(WIFI_SSID, WIFI_PASSWORD)
+    print("Wi-Fi AP:", WIFI_SSID, "IP:", wifi.radio.ipv4_address_ap)
+    wifi_pool = socketpool.SocketPool(wifi.radio)
+    wifi_socket = wifi_pool.socket(wifi_pool.AF_INET, wifi_pool.SOCK_DGRAM)
+    # wifi_socket.setsockopt(0xFFFF, 0x0020, 1)
+    print("JSON UDP broadcast:", WIFI_BROADCAST_IP, WIFI_UDP_PORT)
+except Exception as e:
+    print("Wi-Fi startup error:", repr(e))
+    wifi_socket = None
+
+
+def service_wifi_json():
+    """Broadcast latest telemetry without interrupting the CRSF schedule."""
+    global wifi_last_tx, wifi_tx_count, wifi_tx_errors
+    now = time.monotonic()
+    if now - wifi_last_tx < WIFI_TX_INTERVAL:
+        return
+    wifi_last_tx = now
+    if wifi_socket is None:
+        return
+
+    valid = (last_valid_telemetry_time is not None and
+             now - last_valid_telemetry_time <= TELEMETRY_SIGNAL_TIMEOUT)
+    packet = {
+        "source": "BronzeLink",
+        "link_ok": bool(valid),
+        "latitude": telemetry_gps_lat if valid else None,
+        "longitude": telemetry_gps_lon if valid else None,
+        "heading_deg": telemetry_gps_heading_deg if valid else None,
+        "home_distance_m": telemetry_home_distance_m if valid else None,
+        "altitude_m": telemetry_altitude_m if valid else None,
+        "battery_voltage_v": telemetry_voltage_v if valid else None,
+        "battery_current_a": telemetry_current_a if valid else None,
+        "battery_remaining_pct": telemetry_remaining_pct if valid else None,
+    }
+    try:
+        wifi_socket.sendto(json.dumps(packet).encode("utf-8"),
+                           (WIFI_BROADCAST_IP, WIFI_UDP_PORT))
+        wifi_tx_count += 1
+    except Exception as e:
+        wifi_tx_errors += 1
+        if wifi_tx_errors <= 5 or wifi_tx_errors % 30 == 0:
+            print("Wi-Fi UDP error:", repr(e))
 
 
 # ============================================================
@@ -815,17 +880,18 @@ def print_telemetry_frame(frame):
     frame_type = frame[2]
     decode_telemetry_frame(frame)
 
-    print(
-        "GROUND->HANDSET",
-        telemetry_frame_count,
-        "| ADDR 0x%02X" % frame[0],
-        "| TYPE 0x%02X" % frame_type,
-        crsf_type_name(frame_type),
-        "| LEN",
-        len(frame),
-        "|",
-        " ".join("%02X" % b for b in frame)
-    )
+    if(False):
+        print(
+            "GROUND->HANDSET",
+            telemetry_frame_count,
+            "| ADDR 0x%02X" % frame[0],
+            "| TYPE 0x%02X" % frame_type,
+            crsf_type_name(frame_type),
+            "| LEN",
+            len(frame),
+            "|",
+            " ".join("%02X" % b for b in frame)
+        )
 
 
 def process_telemetry_uart():
@@ -1138,7 +1204,7 @@ def decode_report(data):
 
 print()
 print("============================================")
-print("PICO 2 - TURTLE BEACH -> CRSF + TELEMETRY")
+print("PICO 2 W - TURTLE BEACH -> CRSF + TELEMETRY + WIFI")
 print("============================================")
 print()
 print("USB host: GP2 D+ / GP3 D-")
@@ -1176,6 +1242,7 @@ while True:
     # --------------------------------------------------------
 
     process_telemetry_uart()
+    service_wifi_json()
     update_lcd()
     service_gip_recovery()
 
@@ -1301,5 +1368,7 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
+
 
 
