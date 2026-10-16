@@ -45,6 +45,12 @@ import board
 import busio
 import digitalio
 import usb_host
+
+# Start the PIO USB host immediately, before UART/LCD setup.
+# This may improve enumeration when the controller powers up with the Pico.
+usb_port = usb_host.Port(board.GP2, board.GP3)
+print("USB host initialised early on GP2/GP3")
+
 import usb.core
 import displayio
 import terminalio
@@ -222,7 +228,7 @@ last_telemetry_type = None
 # USB HOST
 # ============================================================
 
-usb_port = usb_host.Port(board.GP2, board.GP3)
+# USB host port already initialised at the start of this script.
 
 device = None
 handset_usb_found = False
