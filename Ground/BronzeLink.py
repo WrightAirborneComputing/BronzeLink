@@ -125,7 +125,8 @@ class BronzeLinkApp:
     def __init__(self, root):
         self.root = root
         root.title("BronzeLink Ground Station")
-        root.geometry("1100x720")
+        root.geometry("1000x600")
+        root.minsize(680, 430)
         try:
             self.tile_server = start_tile_cache_server()
         except OSError as exc:
@@ -141,12 +142,19 @@ class BronzeLinkApp:
         self.last_packet = None
         self.count = 0
         self.values = {}
+        self.value_labels = {}
+        self.last_good_values = {}
+        self.signal_lost = True
+        self.normal_color = "#202020"
+        self.lost_color = "#cc2020"
 
-        panel = ttk.Frame(root, padding=12)
+        # Compact telemetry panel: one row per field, label and value side by side.
+        panel = ttk.Frame(root, padding=(7, 6))
         panel.pack(side=tk.LEFT, fill=tk.Y)
-        ttk.Label(panel, text="BronzeLink", font=("Segoe UI", 19, "bold")).pack(anchor="w", pady=(0, 12))
+        ttk.Label(panel, text="BronzeLink", font=("Segoe UI", 15, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         fields = [
-            ("status", "Link"), ("flight_mode", "Flight mode"),
+            ("status", "Link"), ("flight_mode", "Flight mode"), ("armed", "Armed"),
             ("latitude", "Latitude"), ("longitude", "Longitude"),
             ("heading_deg", "Heading"), ("home_distance_m", "Home distance"),
             ("altitude_m", "Altitude"), ("battery_voltage_v", "Battery voltage"),
@@ -154,16 +162,27 @@ class BronzeLinkApp:
             ("battery_remaining_pct", "Battery remaining"),
             ("packets", "Packets received"),
         ]
-        for key, label in fields:
-            ttk.Label(panel, text=label + ":").pack(anchor="w", pady=(3, 0))
+        for row, (key, label) in enumerate(fields, start=1):
+            ttk.Label(panel, text=label + ":", font=("Segoe UI", 9)).grid(
+                row=row, column=0, sticky="w", padx=(0, 7), pady=1)
             var = tk.StringVar(value="---")
-            ttk.Label(panel, textvariable=var, font=("Segoe UI", 11, "bold")).pack(anchor="w")
+            value_label = tk.Label(panel, textvariable=var, font=("Segoe UI", 9, "bold"),
+                                   fg=self.normal_color, bg=panel.winfo_toplevel().cget("bg"),
+                                   anchor="w")
+            value_label.grid(row=row, column=1, sticky="w", pady=1)
             self.values[key] = var
-        ttk.Checkbutton(panel, text="Follow aircraft", variable=self.follow).pack(anchor="w", pady=(20, 8))
-        ttk.Checkbutton(panel, text="Satellite view", variable=self.satellite,command=self.toggle_satellite).pack(anchor="w", pady=(0, 8))
-        ttk.Button(panel, text="Clear flight track", command=self.clear_track).pack(anchor="w")
-        ttk.Label(panel, text="Tiles are saved automatically when viewed.\nPreviously viewed areas work offline.\nCache: BronzeLink_TileCache",
-                  justify="left", wraplength=220).pack(anchor="w", pady=(25, 0))
+            self.value_labels[key] = value_label
+
+        controls_row = len(fields) + 1
+        ttk.Checkbutton(panel, text="Follow aircraft", variable=self.follow).grid(
+            row=controls_row, column=0, columnspan=2, sticky="w", pady=(7, 0))
+        ttk.Checkbutton(panel, text="Satellite view", variable=self.satellite,
+                        command=self.toggle_satellite).grid(
+            row=controls_row + 1, column=0, columnspan=2, sticky="w", pady=0)
+        ttk.Button(panel, text="Clear flight track", command=self.clear_track).grid(
+            row=controls_row + 2, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        ttk.Label(panel, text="Map tiles cached for offline use", font=("Segoe UI", 8)).grid(
+            row=controls_row + 3, column=0, columnspan=2, sticky="w", pady=(7, 0))
 
         map_frame = ttk.Frame(root)
         map_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
@@ -230,24 +249,46 @@ class BronzeLinkApp:
             pass
         if self.last_packet is None or time.monotonic() - self.last_packet > LINK_TIMEOUT:
             self.values["status"].set("NO TELEMETRY")
+            self.set_signal_lost(True)
         if not self.stop_event.is_set():
             self.root.after(100, self.process_events)
+
+    def set_signal_lost(self, lost):
+        """Keep the last valid readings visible, colouring them red on link loss."""
+        self.signal_lost = lost
+        color = self.lost_color if lost else self.normal_color
+        for key, widget in self.value_labels.items():
+            if key != "packets":
+                widget.configure(fg=color)
 
     def update_telemetry(self, data):
         self.last_packet = time.monotonic()
         self.count += 1
         link_ok = bool(data.get("link_ok"))
         self.values["status"].set("OK" if link_ok else "LOST")
-        self.values["flight_mode"].set(str(data.get("flight_mode") or "---"))
-        self.values["latitude"].set(fmt(data.get("latitude"), 7))
-        self.values["longitude"].set(fmt(data.get("longitude"), 7))
-        self.values["heading_deg"].set(fmt(data.get("heading_deg"), 1, "°"))
-        self.values["home_distance_m"].set(fmt(data.get("home_distance_m"), 0, " m"))
-        self.values["altitude_m"].set(fmt(data.get("altitude_m"), 1, " m"))
-        self.values["battery_voltage_v"].set(fmt(data.get("battery_voltage_v"), 1, " V"))
-        self.values["battery_current_a"].set(fmt(data.get("battery_current_a"), 1, " A"))
-        self.values["battery_remaining_pct"].set(fmt(data.get("battery_remaining_pct"), 0, "%"))
         self.values["packets"].set(str(self.count))
+
+        # The Pico may keep transmitting JSON with link_ok=False and null
+        # fields after aircraft telemetry stops. Do not overwrite good data.
+        # Individual null fields also leave the last known reading intact.
+        fields = {
+            "flight_mode": str(data.get("flight_mode")) if data.get("flight_mode") is not None else None,
+            "armed": ("ARMED" if data["armed"] else "DISARMED") if data.get("armed") is not None else None,
+            "latitude": fmt(data.get("latitude"), 7) if data.get("latitude") is not None else None,
+            "longitude": fmt(data.get("longitude"), 7) if data.get("longitude") is not None else None,
+            "heading_deg": fmt(data.get("heading_deg"), 1, "°") if data.get("heading_deg") is not None else None,
+            "home_distance_m": fmt(data.get("home_distance_m"), 0, " m") if data.get("home_distance_m") is not None else None,
+            "altitude_m": fmt(data.get("altitude_m"), 1, " m") if data.get("altitude_m") is not None else None,
+            "battery_voltage_v": fmt(data.get("battery_voltage_v"), 1, " V") if data.get("battery_voltage_v") is not None else None,
+            "battery_current_a": fmt(data.get("battery_current_a"), 1, " A") if data.get("battery_current_a") is not None else None,
+            "battery_remaining_pct": fmt(data.get("battery_remaining_pct"), 0, "%") if data.get("battery_remaining_pct") is not None else None,
+        }
+        if link_ok:
+            for key, value in fields.items():
+                if value is not None:
+                    self.last_good_values[key] = value
+                    self.values[key].set(value)
+        self.set_signal_lost(not link_ok)
 
         lat, lon = data.get("latitude"), data.get("longitude")
         if not link_ok or not valid_coordinate(lat, lon):

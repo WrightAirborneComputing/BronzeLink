@@ -34,8 +34,6 @@ import time
 # ============================================================
 
 FREQUENCY = 868000000
-TX_POWER_DBM = 22  # SX1262 requested TX power, dBm (up to +22 dBm)
-CRSF_ADDRESS = 0xC8  # CRSF destination/device address used by this link
 
 UART_BAUD = 115200
 
@@ -342,6 +340,7 @@ def crsf_type_name(frame_type):
         0x16: "RC_CHANNELS",
         0x1E: "ATTITUDE",
         0x21: "FLIGHT_MODE",
+        0x7D: "ARMED_STATE",
     }
     return names.get(frame_type, "TYPE_%02X" % frame_type)
 
@@ -484,7 +483,7 @@ def configure_radio():
     command(
         0x8E,
         bytes([
-            TX_POWER_DBM,
+            14,
             0x04
         ])
     )
@@ -748,46 +747,6 @@ def send_radio_packet(data):
 
 
 # ============================================================
-# CRSF LINK STATISTICS FOR HANDSET RSSI DISPLAY
-# ============================================================
-
-def make_link_statistics_frame(rssi_dbm, snr_db):
-    """
-    Create a standard CRSF LINK_STATISTICS (0x14) frame.
-
-    The ground SX1262 measures the aircraft->ground packet RSSI.
-    CRSF encodes RSSI as a positive magnitude:
-        -67 dBm -> 67
-    """
-    rssi_mag = max(0, min(255, -int(round(rssi_dbm))))
-
-    # Signed SNR byte, in dB, two's-complement.
-    snr_int = max(-128, min(127, int(round(snr_db))))
-    snr_byte = snr_int & 0xFF
-
-    payload = bytes([
-        rssi_mag,   # uplink RSSI antenna 1
-        rssi_mag,   # uplink RSSI antenna 2
-        100,        # uplink link quality
-        snr_byte,   # uplink SNR
-        0,          # active antenna
-        0,          # RF mode
-        0,          # uplink TX power
-        rssi_mag,   # downlink RSSI
-        100,        # downlink link quality
-        snr_byte    # downlink SNR
-    ])
-
-    body = bytes([0x14]) + payload
-    crc = crsf_crc(body)
-
-    return bytes([
-        CRSF_ADDRESS,
-        len(body) + 1
-    ]) + body + bytes([crc])
-
-
-# ============================================================
 # SYNCHRONISED TELEMETRY REPLY WINDOW
 # ============================================================
 
@@ -834,9 +793,7 @@ reset_radio()
 configure_radio()
 
 
-print("Ground-master 10 Hz RC; delayed aircraft reply enabled...")
-print("RC slot:", RADIO_INTERVAL_MS, "ms")
-print("Telemetry reply window:", TELEMETRY_REPLY_WINDOW_MS, "ms")
+print("Ground-master 10 Hz RC; immediate aircraft reply enabled...")
 print()
 
 
@@ -848,7 +805,7 @@ telemetry_rx_count = 0
 telemetry_bad_count = 0
 last_telemetry_rx_time = time.ticks_ms()
 
-next_tx_time = time.ticks_add(time.ticks_ms(), RADIO_INTERVAL_MS)
+last_tx_time = time.ticks_ms()
 
 last_report = time.ticks_ms()
 
@@ -870,12 +827,10 @@ while True:
 
     if latest_frame is not None:
 
-        # Absolute slot scheduler: the reply window does NOT get added
-        # to the RC period.  A new RC slot is due every 100 ms.
         if time.ticks_diff(
             now,
-            next_tx_time
-        ) >= 0:
+            last_tx_time
+        ) >= RADIO_INTERVAL_MS:
 
             frame_to_send = latest_frame
 
@@ -911,15 +866,6 @@ while True:
 
                         if telemetry_status is not None:
                             trssi, tsnr, _ = telemetry_status
-
-                            # Follow it with a standard CRSF LINK_STATISTICS
-                            # frame containing the RSSI measured here at ground.
-                            uart.write(
-                                make_link_statistics_frame(
-                                    trssi,
-                                    tsnr
-                                )
-                            )
                             print(
                                 "AIR->GROUND",
                                 telemetry_rx_count,
@@ -952,21 +898,7 @@ while True:
                     "RADIO TX FAILED"
                 )
 
-            # Advance from the scheduled slot, not from the end of the
-            # telemetry receive window.  This prevents cadence drift.
-            next_tx_time = time.ticks_add(
-                next_tx_time,
-                RADIO_INTERVAL_MS
-            )
-
-            # If execution was delayed by more than a complete slot,
-            # skip stale slots rather than sending a burst of old RC frames.
-            now_after_slot = time.ticks_ms()
-            while time.ticks_diff(now_after_slot, next_tx_time) >= 0:
-                next_tx_time = time.ticks_add(
-                    next_tx_time,
-                    RADIO_INTERVAL_MS
-                )
+            last_tx_time = time.ticks_ms()
 
 
     # Link LED follows valid returned telemetry.
@@ -995,10 +927,7 @@ while True:
             "| TELEM bad:",
             telemetry_bad_count,
             "| UART buffer:",
-            len(rx_buffer),
-            "| slot:",
-            RADIO_INTERVAL_MS,
-            "ms"
+            len(rx_buffer)
         )
 
         last_report = now

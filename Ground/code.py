@@ -162,6 +162,7 @@ def service_wifi_json():
         "gps_simulated": WIFI_DUMMY_GPS,
         "link_ok": bool(valid),
         "flight_mode": telemetry_flight_mode if valid else None,
+        "armed": telemetry_armed if valid else None,
         "latitude": json_latitude,
         "longitude": json_longitude,
         "heading_deg": telemetry_gps_heading_deg if valid else None,
@@ -341,6 +342,7 @@ telemetry_current_a = None
 telemetry_remaining_pct = None
 telemetry_airspeed_ms = None
 telemetry_flight_mode = None
+telemetry_armed = None
 telemetry_rssi_dbm = None
 telemetry_heartbeat_count = 0
 last_valid_telemetry_time = None
@@ -739,6 +741,7 @@ def crsf_type_name(frame_type):
         0x2D: "PARAMETER_WRITE",
         0x32: "COMMAND",
         0x7A: "HOME_GPS",
+        0x7D: "ARMED_STATE",
         0x7B: "MSP_RESP",
         0x7C: "MSP_WRITE",
         0x80: "DISPLAYPORT"
@@ -788,6 +791,7 @@ def decode_telemetry_frame(frame):
     global telemetry_remaining_pct
     global telemetry_airspeed_ms
     global telemetry_flight_mode
+    global telemetry_armed
     global telemetry_rssi_dbm
     global telemetry_heartbeat_count
     global last_valid_telemetry_time
@@ -861,6 +865,9 @@ def decode_telemetry_frame(frame):
         if not telemetry_flight_mode:
             telemetry_flight_mode = None
 
+    elif frame_type == 0x7D and len(frame) >= 5:
+        telemetry_armed = bool(frame[3])
+
     elif frame_type == 0x0B:
         telemetry_heartbeat_count += 1
 
@@ -897,7 +904,9 @@ def update_lcd(force=False):
     else:
         lcd_handset.text = "HANDSET: NOT CONNECTED"
 
-    lcd_title.text = "MODE: " + (telemetry_flight_mode if link_ok and telemetry_flight_mode else "---")
+    mode = telemetry_flight_mode if link_ok and telemetry_flight_mode else "---"
+    arm = ("ARMED" if telemetry_armed else "DISARMED") if link_ok and telemetry_armed is not None else "---"
+    lcd_title.text = "MODE: %s %s" % (mode[:13], arm)
 
     lcd_alt.text = "ALT: %6.1f m" % alt if alt is not None else "ALT: ---.- m"
 
@@ -1425,7 +1434,6 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
-
 
 
 
