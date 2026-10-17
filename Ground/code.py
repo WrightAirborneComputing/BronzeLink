@@ -76,6 +76,12 @@ WIFI_TX_INTERVAL = 1.0
 WIFI_CLIENT_TIMEOUT = 15.0
 WIFI_MAX_CLIENTS = 4
 
+# Indoor map test: override ONLY the GPS position in outgoing Wi-Fi JSON.
+# CRSF telemetry decoding, LCD, and radio control remain unchanged.
+WIFI_DUMMY_GPS = False
+WIFI_DUMMY_LATITUDE = 51.247400
+WIFI_DUMMY_LONGITUDE = -2.778506
+
 wifi_socket = None
 wifi_discovery_socket = None
 wifi_clients = {}  # IP -> time of last HELLO
@@ -149,12 +155,15 @@ def service_wifi_json():
 
     valid = (last_valid_telemetry_time is not None and
              now - last_valid_telemetry_time <= TELEMETRY_SIGNAL_TIMEOUT)
+    json_latitude = WIFI_DUMMY_LATITUDE if WIFI_DUMMY_GPS else (telemetry_gps_lat if valid else None)
+    json_longitude = WIFI_DUMMY_LONGITUDE if WIFI_DUMMY_GPS else (telemetry_gps_lon if valid else None)
     packet = {
         "source": "BronzeLink",
+        "gps_simulated": WIFI_DUMMY_GPS,
         "link_ok": bool(valid),
         "flight_mode": telemetry_flight_mode if valid else None,
-        "latitude": telemetry_gps_lat if valid else None,
-        "longitude": telemetry_gps_lon if valid else None,
+        "latitude": json_latitude,
+        "longitude": json_longitude,
         "heading_deg": telemetry_gps_heading_deg if valid else None,
         "home_distance_m": telemetry_home_distance_m if valid else None,
         "altitude_m": telemetry_altitude_m if valid else None,
