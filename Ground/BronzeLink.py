@@ -66,6 +66,7 @@ def main():
             stamp = datetime.now().strftime("%H:%M:%S")
             link = "OK" if data.get("link_ok") else "LOST"
             print(f"[{stamp}] #{count} from {sender[0]} | LINK {link}")
+            print("  Flight mode:", data.get("flight_mode", "---"))
             print("  GPS:       ", fmt(data.get("latitude"), 7), ",", fmt(data.get("longitude"), 7))
             print("  Heading:   ", fmt(data.get("heading_deg"), 1, " deg"))
             print("  Home dist: ", fmt(data.get("home_distance_m"), 0, " m"))

@@ -65,34 +65,74 @@ import adafruit_st7789
 # ============================================================
 # BRONZELINK WI-FI ACCESS POINT + JSON UDP TELEMETRY
 # ============================================================
-# Join BronzeLink using this password, then listen for UDP on port 14560.
-# The Pico broadcasts to the AP subnet (normally 192.168.4.255).
+# PC receivers announce themselves to UDP port 14561. The Pico then sends
+# JSON telemetry directly to each registered receiver on UDP port 14560.
+# No broadcast socket options and no hard-coded PC IP addresses are needed.
 WIFI_SSID = "BronzeLink"
-WIFI_PASSWORD = "password"  # Change before operational use (>= 8 chars)
+WIFI_PASSWORD = "password"
 WIFI_UDP_PORT = 14560
-WIFI_TX_INTERVAL = 1.0  # seconds; independent of the RC scheduler
-WIFI_BROADCAST_IP = "192.168.4.255"
+WIFI_DISCOVERY_PORT = 14561
+WIFI_TX_INTERVAL = 1.0
+WIFI_CLIENT_TIMEOUT = 15.0
+WIFI_MAX_CLIENTS = 4
 
 wifi_socket = None
+wifi_discovery_socket = None
+wifi_clients = {}  # IP -> time of last HELLO
 wifi_last_tx = time.monotonic()
 wifi_tx_count = 0
 wifi_tx_errors = 0
+wifi_discovery_buffer = bytearray(256)
 
 try:
     wifi.radio.start_ap(WIFI_SSID, WIFI_PASSWORD)
     print("Wi-Fi AP:", WIFI_SSID, "IP:", wifi.radio.ipv4_address_ap)
     wifi_pool = socketpool.SocketPool(wifi.radio)
     wifi_socket = wifi_pool.socket(wifi_pool.AF_INET, wifi_pool.SOCK_DGRAM)
-    # wifi_socket.setsockopt(0xFFFF, 0x0020, 1)
-    print("JSON UDP broadcast:", WIFI_BROADCAST_IP, WIFI_UDP_PORT)
+    wifi_discovery_socket = wifi_pool.socket(wifi_pool.AF_INET, wifi_pool.SOCK_DGRAM)
+    wifi_discovery_socket.bind(("0.0.0.0", WIFI_DISCOVERY_PORT))
+    wifi_discovery_socket.settimeout(0)  # nonblocking; do not delay RC loop
+    print("BronzeLink receiver discovery: UDP", WIFI_DISCOVERY_PORT)
+    print("BronzeLink JSON telemetry: UDP", WIFI_UDP_PORT)
 except Exception as e:
     print("Wi-Fi startup error:", repr(e))
     wifi_socket = None
+    wifi_discovery_socket = None
+
+
+def service_wifi_discovery():
+    """Read at most one receiver registration per iteration; never block."""
+    if wifi_discovery_socket is None:
+        return
+    try:
+        nbytes, address = wifi_discovery_socket.recvfrom_into(wifi_discovery_buffer)
+        message = bytes(wifi_discovery_buffer[:nbytes])
+    except OSError:
+        # No packet available on nonblocking socket (usually EAGAIN).
+        return
+    except Exception as e:
+        print("Wi-Fi discovery error:", repr(e))
+        return
+    if message.strip() != b"BRONZELINK_HELLO":
+        return
+    ip = address[0]
+    if ip not in wifi_clients and len(wifi_clients) >= WIFI_MAX_CLIENTS:
+        # Prefer removing a stale client before refusing a new one.
+        now = time.monotonic()
+        for old_ip, last_seen in tuple(wifi_clients.items()):
+            if now - last_seen > WIFI_CLIENT_TIMEOUT:
+                del wifi_clients[old_ip]
+        if len(wifi_clients) >= WIFI_MAX_CLIENTS:
+            return
+    if ip not in wifi_clients:
+        print("BronzeLink receiver discovered:", ip)
+    wifi_clients[ip] = time.monotonic()
 
 
 def service_wifi_json():
-    """Broadcast latest telemetry without interrupting the CRSF schedule."""
+    """Send telemetry to registered clients without delaying CRSF scheduling."""
     global wifi_last_tx, wifi_tx_count, wifi_tx_errors
+    service_wifi_discovery()
     now = time.monotonic()
     if now - wifi_last_tx < WIFI_TX_INTERVAL:
         return
@@ -100,11 +140,19 @@ def service_wifi_json():
     if wifi_socket is None:
         return
 
+    for ip, last_seen in tuple(wifi_clients.items()):
+        if now - last_seen > WIFI_CLIENT_TIMEOUT:
+            del wifi_clients[ip]
+            print("BronzeLink receiver expired:", ip)
+    if not wifi_clients:
+        return
+
     valid = (last_valid_telemetry_time is not None and
              now - last_valid_telemetry_time <= TELEMETRY_SIGNAL_TIMEOUT)
     packet = {
         "source": "BronzeLink",
         "link_ok": bool(valid),
+        "flight_mode": telemetry_flight_mode if valid else None,
         "latitude": telemetry_gps_lat if valid else None,
         "longitude": telemetry_gps_lon if valid else None,
         "heading_deg": telemetry_gps_heading_deg if valid else None,
@@ -114,14 +162,15 @@ def service_wifi_json():
         "battery_current_a": telemetry_current_a if valid else None,
         "battery_remaining_pct": telemetry_remaining_pct if valid else None,
     }
-    try:
-        wifi_socket.sendto(json.dumps(packet).encode("utf-8"),
-                           (WIFI_BROADCAST_IP, WIFI_UDP_PORT))
-        wifi_tx_count += 1
-    except Exception as e:
-        wifi_tx_errors += 1
-        if wifi_tx_errors <= 5 or wifi_tx_errors % 30 == 0:
-            print("Wi-Fi UDP error:", repr(e))
+    payload = json.dumps(packet).encode("utf-8")
+    for ip in tuple(wifi_clients):
+        try:
+            wifi_socket.sendto(payload, (ip, WIFI_UDP_PORT))
+            wifi_tx_count += 1
+        except Exception as e:
+            wifi_tx_errors += 1
+            if wifi_tx_errors <= 5 or wifi_tx_errors % 30 == 0:
+                print("Wi-Fi UDP error to", ip, repr(e))
 
 
 # ============================================================
@@ -880,18 +929,17 @@ def print_telemetry_frame(frame):
     frame_type = frame[2]
     decode_telemetry_frame(frame)
 
-    if(False):
-        print(
-            "GROUND->HANDSET",
-            telemetry_frame_count,
-            "| ADDR 0x%02X" % frame[0],
-            "| TYPE 0x%02X" % frame_type,
-            crsf_type_name(frame_type),
-            "| LEN",
-            len(frame),
-            "|",
-            " ".join("%02X" % b for b in frame)
-        )
+    print(
+        "GROUND->HANDSET",
+        telemetry_frame_count,
+        "| ADDR 0x%02X" % frame[0],
+        "| TYPE 0x%02X" % frame_type,
+        crsf_type_name(frame_type),
+        "| LEN",
+        len(frame),
+        "|",
+        " ".join("%02X" % b for b in frame)
+    )
 
 
 def process_telemetry_uart():
@@ -1368,6 +1416,7 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
 
 
 
