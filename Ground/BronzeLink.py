@@ -155,13 +155,12 @@ class BronzeLinkApp:
             ("packets", "Packets received"),
         ]
         for key, label in fields:
-            ttk.Label(panel, text=label + ":").pack(anchor="w", pady=(5, 0))
+            ttk.Label(panel, text=label + ":").pack(anchor="w", pady=(3, 0))
             var = tk.StringVar(value="---")
             ttk.Label(panel, textvariable=var, font=("Segoe UI", 11, "bold")).pack(anchor="w")
             self.values[key] = var
         ttk.Checkbutton(panel, text="Follow aircraft", variable=self.follow).pack(anchor="w", pady=(20, 8))
-        ttk.Checkbutton(panel, text="Satellite view", variable=self.satellite,
-                        command=self.toggle_satellite).pack(anchor="w", pady=(0, 8))
+        ttk.Checkbutton(panel, text="Satellite view", variable=self.satellite,command=self.toggle_satellite).pack(anchor="w", pady=(0, 8))
         ttk.Button(panel, text="Clear flight track", command=self.clear_track).pack(anchor="w")
         ttk.Label(panel, text="Tiles are saved automatically when viewed.\nPreviously viewed areas work offline.\nCache: BronzeLink_TileCache",
                   justify="left", wraplength=220).pack(anchor="w", pady=(25, 0))
