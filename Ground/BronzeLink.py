@@ -1,15 +1,21 @@
 """BronzeLink ground station with a live GPS map and satellite toggle.
 
 Install: python -m pip install tkintermapview
-Connect to BronzeLink Wi-Fi, then: python bronzelink_groundstation_map.py
+Connect to BronzeLink Wi-Fi, then: python bronzelink_groundstation_cached.py
 
-Map tiles require internet access initially; cached tiles may work offline.
+Tiles are cached on disk automatically as you pan/zoom the map.
+Previously visited areas are available without internet.
 """
 import json
 import math
 import queue
 import socket
 import threading
+import os
+from pathlib import Path
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 import time
 import tkinter as tk
 from tkinter import ttk
@@ -26,11 +32,77 @@ HELLO_INTERVAL = 3.0
 LINK_TIMEOUT = 5.0
 MAX_TRACK_POINTS = 1000
 
+# Tiles are saved persistently next to this script in BronzeLink_TileCache.
+# Previously viewed areas can be displayed without internet access.
+CACHE_DIR = Path(__file__).resolve().parent / "BronzeLink_TileCache"
+TILE_PROXY_PORT = 18765
+TILE_FETCH_TIMEOUT = 4.0
+
 MAP_TILES = "https://a.tile.openstreetmap.org/{z}/{x}/{y}.png"
 SATELLITE_TILES = (
     "https://server.arcgisonline.com/ArcGIS/rest/services/"
     "World_Imagery/MapServer/tile/{z}/{y}/{x}"
 )
+
+
+class TileCacheHandler(BaseHTTPRequestHandler):
+    """Serve cached map tiles locally; fetch missing ones when online."""
+
+    def do_GET(self):
+        # Paths: /map/z/x/y.png and /sat/z/x/y.png
+        parts = self.path.split("?", 1)[0].strip("/").split("/")
+        if len(parts) != 4 or parts[0] not in ("map", "sat"):
+            self.send_error(404)
+            return
+        style, ztext, xtext, ytext = parts
+        try:
+            z, x, y = int(ztext), int(xtext), int(ytext.removesuffix(".png"))
+            if not (0 <= z <= 19 and 0 <= x < 2 ** z and 0 <= y < 2 ** z):
+                raise ValueError("Invalid tile coordinates")
+        except ValueError:
+            self.send_error(404)
+            return
+
+        filename = CACHE_DIR / style / str(z) / str(x) / (str(y) + ".png")
+        try:
+            if filename.is_file():
+                content = filename.read_bytes()
+            else:
+                template = MAP_TILES if style == "map" else SATELLITE_TILES
+                url = template.format(z=z, x=x, y=y)
+                req = Request(url, headers={"User-Agent": "BronzeLinkGroundStation/1.0"})
+                with urlopen(req, timeout=TILE_FETCH_TIMEOUT) as response:
+                    content = response.read()
+                if not content:
+                    raise ValueError("Empty tile")
+                filename.parent.mkdir(parents=True, exist_ok=True)
+                # Atomic replacement protects against simultaneous requests.
+                temp = filename.with_name(filename.name + "." + str(threading.get_ident()) + ".tmp")
+                temp.write_bytes(content)
+                os.replace(temp, filename)
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(content)))
+            self.end_headers()
+            self.wfile.write(content)
+        except (OSError, URLError, HTTPError, ValueError):
+            # Missing tile while offline: do not cache a blank/error tile.
+            self.send_error(404, "Tile not cached and internet unavailable")
+
+    def log_message(self, format, *args):
+        pass  # avoid filling the console during map panning
+
+
+def start_tile_cache_server():
+    server = ThreadingHTTPServer(("127.0.0.1", TILE_PROXY_PORT), TileCacheHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server
+
+
+def local_tile_url(style):
+    return "http://127.0.0.1:%d/%s/{z}/{x}/{y}.png" % (TILE_PROXY_PORT, style)
 
 
 def fmt(value, digits=1, suffix=""):
@@ -54,6 +126,11 @@ class BronzeLinkApp:
         self.root = root
         root.title("BronzeLink Ground Station")
         root.geometry("1100x720")
+        try:
+            self.tile_server = start_tile_cache_server()
+        except OSError as exc:
+            raise RuntimeError("Could not start local tile cache on port %d: %s" %
+                               (TILE_PROXY_PORT, exc)) from exc
         self.events = queue.Queue(maxsize=100)
         self.stop_event = threading.Event()
         self.track = []
@@ -86,14 +163,14 @@ class BronzeLinkApp:
         ttk.Checkbutton(panel, text="Satellite view", variable=self.satellite,
                         command=self.toggle_satellite).pack(anchor="w", pady=(0, 8))
         ttk.Button(panel, text="Clear flight track", command=self.clear_track).pack(anchor="w")
-        ttk.Label(panel, text="Map tiles need internet initially.\nGPS tracking still works offline.",
+        ttk.Label(panel, text="Tiles are saved automatically when viewed.\nPreviously viewed areas work offline.\nCache: BronzeLink_TileCache",
                   justify="left", wraplength=220).pack(anchor="w", pady=(25, 0))
 
         map_frame = ttk.Frame(root)
         map_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         self.map = tkintermapview.TkinterMapView(map_frame, corner_radius=0)
         self.map.pack(fill=tk.BOTH, expand=True)
-        self.map.set_tile_server(MAP_TILES, max_zoom=19)
+        self.map.set_tile_server(local_tile_url("map"), max_zoom=19)
         self.map.set_position(51.0, -2.5)  # Initial view only; not aircraft position
         self.map.set_zoom(9)
 
@@ -197,7 +274,7 @@ class BronzeLinkApp:
 
     def toggle_satellite(self):
         """Switch background imagery without affecting marker or flight track."""
-        tiles = SATELLITE_TILES if self.satellite.get() else MAP_TILES
+        tiles = local_tile_url("sat" if self.satellite.get() else "map")
         self.map.set_tile_server(tiles, max_zoom=19)
 
     def clear_track(self):
@@ -208,6 +285,8 @@ class BronzeLinkApp:
 
     def close(self):
         self.stop_event.set()
+        self.tile_server.shutdown()
+        self.tile_server.server_close()
         self.root.destroy()
 
 
