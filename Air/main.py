@@ -37,6 +37,7 @@ TELEMETRY_REPLY_DELAY_MS = 20   # guard time: let ground finish TX->RX turnaroun
 # One frame is returned immediately after each valid RC uplink packet:
 # FLIGHT_MODE -> BATTERY -> BARO_ALT -> GPS -> HOME_GPS -> repeat.
 TELEMETRY_PRIORITY = (
+    0x7D,  # CUSTOM armed state from MAVLink HEARTBEAT
     0x21,  # FLIGHT_MODE
     0x08,  # BATTERY
     0x09,  # BARO_ALT (generated from MAVLink LOCAL_POSITION_NED)
@@ -668,6 +669,12 @@ def apply_attitude_heading_to_gps():
     fc_latest_frames[0x02] = bytes(updated)
 
 
+def make_crsf_armed(armed):
+    """Private BronzeLink CRSF 0x7D: 1=armed, 0=disarmed."""
+    body = bytes([0x7D, 1 if armed else 0])
+    return bytes([CRSF_ADDRESS, len(body) + 1]) + body + bytes([crsf_crc(body)])
+
+
 def process_mavlink():
     global mav_buffer
     global mav_relative_alt_m
@@ -723,6 +730,14 @@ def process_mavlink():
 
         frame = bytes(mav_buffer[:frame_len])
         mav_buffer = mav_buffer[frame_len:]
+
+        # MAVLink HEARTBEAT (msg 0): base_mode at payload offset 6,
+        # MAV_MODE_FLAG_SAFETY_ARMED = 0x80. Ignore non-autopilot heartbeats.
+        if msg_id == 0 and payload_len >= 9:
+            autopilot = frame[payload_start + 5]
+            if autopilot != 8:  # MAV_AUTOPILOT_INVALID (e.g. a GCS)
+                base_mode = frame[payload_start + 6]
+                fc_latest_frames[0x7D] = make_crsf_armed(bool(base_mode & 0x80))
 
         # LOCAL_POSITION_NED has a 28-byte payload.
         if msg_id == 32 and payload_len >= 28:
@@ -854,6 +869,7 @@ def crsf_type_name(frame_type):
         0x2D: "PARAMETER_WRITE",
         0x32: "COMMAND",
         0x7A: "HOME_GPS",
+        0x7D: "ARMED_STATE",
         0x7B: "MSP_RESP",
         0x7C: "MSP_WRITE",
         0x80: "DISPLAYPORT"
