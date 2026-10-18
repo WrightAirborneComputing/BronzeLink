@@ -249,11 +249,11 @@ def configure_radio():
         bytes([0x01])
     )
 
-    # SF7 / BW500 / CR4/5
+    # SF8 / BW500 / CR4/5
     command(
         0x8B,
         bytes([
-            0x07,
+            0x08,
             0x06,
             0x01,
             0x00
