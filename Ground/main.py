@@ -312,6 +312,27 @@ def receive_radio_packet():
     return bytes(data), radio_status
 
 
+def make_link_statistics(rssi_dbm, snr_db):
+    """CRSF 0x14 link statistics from the SX1262 received packet."""
+    magnitude = max(0, min(255, int(round(-rssi_dbm))))
+    # CRSF uplink SNR is signed int8 in dB.
+    snr = max(-128, min(127, int(round(snr_db)))) & 0xFF
+    payload = bytes([
+        magnitude,  # uplink RSSI antenna 1 (positive magnitude)
+        magnitude,  # uplink RSSI antenna 2 (single-antenna radio)
+        100,        # uplink link quality: received packet (placeholder)
+        snr,        # uplink SNR, signed int8
+        0,          # active antenna
+        0,          # RF mode (custom link)
+        0,          # uplink TX power (unknown)
+        magnitude,  # downlink RSSI (air-to-ground measured locally)
+        100,        # downlink link quality (placeholder)
+        snr,        # downlink SNR
+    ])
+    body = bytes([0x14]) + payload
+    return bytes([0xC8, len(body) + 1]) + body + bytes([crsf_crc(body)])
+
+
 def valid_crsf_any(frame):
     # General CRSF frame:
     # address, length, type, payload..., CRC
@@ -862,6 +883,13 @@ while True:
                         # Pass the original CRSF frame unchanged to Pico 2W.
                         uart.write(telemetry)
 
+                        # The handset expects CRSF LINK_STATISTICS (0x14),
+                        # which the aircraft does not generate.  Create it
+                        # locally from the ground SX1262 packet status.
+                        if telemetry_status is not None:
+                            trssi, tsnr, _ = telemetry_status
+                            uart.write(make_link_statistics(trssi, tsnr))
+
                         frame_type = telemetry[2]
 
                         if telemetry_status is not None:
@@ -934,4 +962,5 @@ while True:
 
 
     time.sleep_ms(1)
+
 
