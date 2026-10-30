@@ -1104,6 +1104,7 @@ previous_right_trigger = False
 
 # GIP analogue trigger is 0..1023; consider RT pressed above midpoint.
 RIGHT_TRIGGER_PRESS_THRESHOLD = 512
+LEFT_TRIGGER_PRESS_THRESHOLD = 512
 
 def decode_report(data):
     global channel_5_latched
@@ -1238,18 +1239,17 @@ def decode_report(data):
 
     # --------------------------------------------------------
     # CH8 ARM channel (latched):
-    #   top-right centre / Menu -> 1000 us
-    #   top-left centre / View  -> 2000 us
+    #   left shoulder (LB) -> 1000 us (disarm)
+    #   left trigger (LT)  -> 2000 us (arm)
     #   release -> retain selected value
-    #
-    # These two buttons are dedicated to CH8 and have no other
-    # CRSF channel mapping.
+    # LT is analogue; 50% travel counts as pressed.
+    # LT takes priority if both controls are held.
     # --------------------------------------------------------
-    if top_right:
-        channel_8_latched = pwm_to_crsf(1000)
-
-    if top_left:
+    if left_shoulder:
         channel_8_latched = pwm_to_crsf(2000)
+
+    if left_trigger >= LEFT_TRIGGER_PRESS_THRESHOLD:
+        channel_8_latched = pwm_to_crsf(1000)
 
     channels = [
         stick_to_crsf(right_x, False),     # CH1 Roll
@@ -1447,6 +1447,7 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
 
 
 
