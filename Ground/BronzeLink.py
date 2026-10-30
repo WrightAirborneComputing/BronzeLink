@@ -1,6 +1,6 @@
 """BronzeLink ground station with a live GPS map and satellite toggle.
 
-Install: python -m pip install tkintermapview
+Install: python -m pip install tkintermapview pillow
 Connect to BronzeLink Wi-Fi, then: python bronzelink_groundstation_cached.py
 
 Tiles are cached on disk automatically as you pan/zoom the map.
@@ -19,6 +19,7 @@ from urllib.error import URLError, HTTPError
 import time
 import tkinter as tk
 from tkinter import ttk
+from PIL import Image, ImageDraw, ImageTk
 
 try:
     import tkintermapview
@@ -121,6 +122,27 @@ def valid_coordinate(lat, lon):
             and not (lat == 0 and lon == 0))
 
 
+def aircraft_arrow_icon(heading_deg):
+    """Draw a north-referenced aircraft arrow (0=N, 90=E) on a transparent icon."""
+    size = 52
+    center = size / 2
+    angle = math.radians(heading_deg)
+    # Coordinates in aircraft-forward/right axes. Positive y points forward.
+    outline = [(0, 21), (-10, -11), (0, -6), (10, -11)]
+    def rotate(point):
+        right, forward = point
+        return (center + right * math.cos(angle) + forward * math.sin(angle),
+                center + right * math.sin(angle) - forward * math.cos(angle))
+    points = [rotate(point) for point in outline]
+    image = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.polygon(points, fill="#1576d1")
+    draw.line(points + [points[0]], fill="white", width=3, joint="curve")
+    draw.ellipse((center - 3, center - 3, center + 3, center + 3), fill="white")
+    # TkinterMapView requires an ImageTk.PhotoImage, not a PIL Image.
+    return ImageTk.PhotoImage(image)
+
+
 class BronzeLinkApp:
     def __init__(self, root):
         self.root = root
@@ -136,6 +158,8 @@ class BronzeLinkApp:
         self.stop_event = threading.Event()
         self.track = []
         self.marker = None
+        self.marker_heading = None
+        self.heading_icons = {}
         self.path = None
         self.follow = tk.BooleanVar(value=True)
         self.satellite = tk.BooleanVar(value=False)
@@ -294,14 +318,34 @@ class BronzeLinkApp:
         if not link_ok or not valid_coordinate(lat, lon):
             return
         point = (float(lat), float(lon))
-        if self.marker is None:
-            self.marker = self.map.set_marker(*point, text="Aircraft")
+        # Heading is degrees clockwise from north. Keep the last valid heading
+        # if a GPS update arrives without a new heading measurement.
+        heading = data.get("heading_deg")
+        if isinstance(heading, (int, float)) and not isinstance(heading, bool) and math.isfinite(heading):
+            self.marker_heading = int(round(heading)) % 360
+        if self.marker_heading is not None and self.marker_heading not in self.heading_icons:
+            self.heading_icons[self.marker_heading] = aircraft_arrow_icon(self.marker_heading)
+        icon = self.heading_icons.get(self.marker_heading)
+
+        first_fix = self.marker is None
+        if first_fix:
+            self.marker = self.map.set_marker(*point, text="Aircraft", icon=icon)
             self.map.set_position(*point)
             self.map.set_zoom(16)
         else:
             self.marker.set_position(*point)
+            if icon is not None:
+                # TkinterMapView versions differ in whether they expose
+                # change_icon(). Recreate only when needed as a fallback.
+                if getattr(self, "displayed_heading", None) != self.marker_heading:
+                    if hasattr(self.marker, "change_icon"):
+                        self.marker.change_icon(icon)
+                    else:
+                        self.marker.delete()
+                        self.marker = self.map.set_marker(*point, text="Aircraft", icon=icon)
             if self.follow.get():
                 self.map.set_position(*point)
+        self.displayed_heading = self.marker_heading
         if not self.track or point != self.track[-1]:
             self.track.append(point)
             if len(self.track) > MAX_TRACK_POINTS:
