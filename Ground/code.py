@@ -163,6 +163,7 @@ def service_wifi_json():
         "link_ok": bool(valid),
         "flight_mode": telemetry_flight_mode if valid else None,
         "armed": telemetry_armed if valid else None,
+        "vtol_state": telemetry_vtol_state if valid else None,
         "latitude": json_latitude,
         "longitude": json_longitude,
         "heading_deg": telemetry_gps_heading_deg if valid else None,
@@ -343,6 +344,7 @@ telemetry_remaining_pct = None
 telemetry_airspeed_ms = None
 telemetry_flight_mode = None
 telemetry_armed = None
+telemetry_vtol_state = None
 telemetry_rssi_dbm = None
 telemetry_heartbeat_count = 0
 last_valid_telemetry_time = None
@@ -742,6 +744,7 @@ def crsf_type_name(frame_type):
         0x32: "COMMAND",
         0x7A: "HOME_GPS",
         0x7D: "ARMED_STATE",
+        0x7E: "VTOL_STATE",
         0x7B: "MSP_RESP",
         0x7C: "MSP_WRITE",
         0x80: "DISPLAYPORT"
@@ -792,6 +795,7 @@ def decode_telemetry_frame(frame):
     global telemetry_airspeed_ms
     global telemetry_flight_mode
     global telemetry_armed
+    global telemetry_vtol_state
     global telemetry_rssi_dbm
     global telemetry_heartbeat_count
     global last_valid_telemetry_time
@@ -868,6 +872,11 @@ def decode_telemetry_frame(frame):
     elif frame_type == 0x7D and len(frame) >= 5:
         telemetry_armed = bool(frame[3])
 
+    elif frame_type == 0x7E and len(frame) >= 5:
+        states = ("---", "TO FW", "TO MC", "MC", "FW")
+        state = frame[3]
+        telemetry_vtol_state = states[state] if state < len(states) else "---"
+
     elif frame_type == 0x0B:
         telemetry_heartbeat_count += 1
 
@@ -906,7 +915,8 @@ def update_lcd(force=False):
 
     mode = telemetry_flight_mode if link_ok and telemetry_flight_mode else "---"
     arm = ("ARMED" if telemetry_armed else "DISARMED") if link_ok and telemetry_armed is not None else "---"
-    lcd_title.text = "MODE: %s %s" % (mode[:13], arm)
+    vtol = telemetry_vtol_state if link_ok and telemetry_vtol_state else "---"
+    lcd_title.text = "MODE:%s %s %s" % (mode[:8], vtol, arm)
 
     lcd_alt.text = "ALT: %6.1f m" % alt if alt is not None else "ALT: ---.- m"
 

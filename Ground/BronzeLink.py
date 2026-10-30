@@ -178,7 +178,7 @@ class BronzeLinkApp:
         ttk.Label(panel, text="BronzeLink", font=("Segoe UI", 15, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
         fields = [
-            ("status", "Link"), ("flight_mode", "Flight mode"), ("armed", "Armed"),
+            ("status", "Link"), ("flight_mode", "Flight mode"), ("vtol_state", "VTOL mode"), ("armed", "Armed"),
             ("latitude", "Latitude"), ("longitude", "Longitude"),
             ("heading_deg", "Heading"), ("home_distance_m", "Home distance"),
             ("altitude_m", "Altitude"), ("battery_voltage_v", "Battery voltage"),
@@ -298,6 +298,7 @@ class BronzeLinkApp:
         fields = {
             "flight_mode": str(data.get("flight_mode")) if data.get("flight_mode") is not None else None,
             "armed": ("ARMED" if data["armed"] else "DISARMED") if data.get("armed") is not None else None,
+            "vtol_state": str(data.get("vtol_state")) if data.get("vtol_state") is not None else None,
             "latitude": fmt(data.get("latitude"), 7) if data.get("latitude") is not None else None,
             "longitude": fmt(data.get("longitude"), 7) if data.get("longitude") is not None else None,
             "heading_deg": fmt(data.get("heading_deg"), 1, "°") if data.get("heading_deg") is not None else None,
