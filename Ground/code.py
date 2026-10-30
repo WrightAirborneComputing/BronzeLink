@@ -1087,17 +1087,20 @@ channel_5_latched = CRSF_MIN
 channel_6_latched = CRSF_MIN
 channel_8_latched = CRSF_MIN
 
-# Previous shoulder states are used so CH5 responds only to a new press.
-# Releasing either shoulder never changes the latched CH5 value.
-previous_left_shoulder = False
+# Previous RB/RT states are used so CH5 responds only to a new press.
+# Releasing either control never changes the latched CH5 value.
 previous_right_shoulder = False
+previous_right_trigger = False
+
+# GIP analogue trigger is 0..1023; consider RT pressed above midpoint.
+RIGHT_TRIGGER_PRESS_THRESHOLD = 512
 
 def decode_report(data):
     global channel_5_latched
     global channel_6_latched
     global channel_8_latched
-    global previous_left_shoulder
     global previous_right_shoulder
+    global previous_right_trigger
     # Xbox GIP input packet is currently 36 bytes.
     if len(data) < 19:
         return None
@@ -1187,13 +1190,12 @@ def decode_report(data):
     # --------------------------------------------------------
     #
     # CH5 (PWM-equivalent positions):
-    #   new press of LB or RB -> select 1000 us
-    #   press second shoulder while first is held -> select 2000 us
+    #   new press of RB or RT -> select 1000 us
+    #   press the second control while first is held -> select 2000 us
     #   release either/both -> retain selected value
     #
-    # Using rising edges is important here. After both shoulders have
-    # selected 2000 us, releasing one leaves the other physically held;
-    # that release must NOT be interpreted as a new 1000 us selection.
+    # Rising-edge detection prevents a release from changing CH5.
+    # RT is an analogue input and is treated as pressed above the threshold.
     #
     # CH6 (PWM-equivalent positions):
     #   Y -> select 1000 us
@@ -1203,16 +1205,17 @@ def decode_report(data):
     #   release -> retain selected value
     # --------------------------------------------------------
 
-    left_pressed = left_shoulder and not previous_left_shoulder
-    right_pressed = right_shoulder and not previous_right_shoulder
+    right_trigger_pressed = right_trigger >= RIGHT_TRIGGER_PRESS_THRESHOLD
+    shoulder_new_press = right_shoulder and not previous_right_shoulder
+    trigger_new_press = right_trigger_pressed and not previous_right_trigger
 
-    if (left_pressed and right_shoulder) or (right_pressed and left_shoulder):
+    if (shoulder_new_press and right_trigger_pressed) or (trigger_new_press and right_shoulder):
         channel_5_latched = pwm_to_crsf(2000)
-    elif left_pressed or right_pressed:
+    elif shoulder_new_press or trigger_new_press:
         channel_5_latched = pwm_to_crsf(1000)
 
-    previous_left_shoulder = left_shoulder
     previous_right_shoulder = right_shoulder
+    previous_right_trigger = right_trigger_pressed
 
     if button_y:
         channel_6_latched = pwm_to_crsf(1000)
@@ -1244,7 +1247,7 @@ def decode_report(data):
         stick_to_crsf(left_y, True),       # CH3 Throttle
         stick_to_crsf(left_x, False),          # CH4 Yaw
 
-        channel_5_latched,                          # CH5 latched shoulder selector
+        channel_5_latched,                          # CH5 latched RB + RT selector
         channel_6_latched,                          # CH6 latched face-button selector
         CRSF_MIN,                                   # CH7 unused
         channel_8_latched,                          # CH8 ARM latched
@@ -1434,6 +1437,8 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
+
+
 
 
 
