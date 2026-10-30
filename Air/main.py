@@ -38,6 +38,7 @@ TELEMETRY_REPLY_DELAY_MS = 20   # guard time: let ground finish TX->RX turnaroun
 # FLIGHT_MODE -> BATTERY -> BARO_ALT -> GPS -> HOME_GPS -> repeat.
 TELEMETRY_PRIORITY = (
     0x7D,  # CUSTOM armed state from MAVLink HEARTBEAT
+    0x7E,  # CUSTOM VTOL state from MAVLink EXTENDED_SYS_STATE
     0x21,  # FLIGHT_MODE
     0x08,  # BATTERY
     0x09,  # BARO_ALT (generated from MAVLink LOCAL_POSITION_NED)
@@ -675,6 +676,12 @@ def make_crsf_armed(armed):
     return bytes([CRSF_ADDRESS, len(body) + 1]) + body + bytes([crsf_crc(body)])
 
 
+def make_crsf_vtol_state(vtol_state):
+    """Private BronzeLink CRSF 0x7E: MAV_VTOL_STATE (0..4)."""
+    body = bytes([0x7E, vtol_state])
+    return bytes([CRSF_ADDRESS, len(body) + 1]) + body + bytes([crsf_crc(body)])
+
+
 def process_mavlink():
     global mav_buffer
     global mav_relative_alt_m
@@ -738,6 +745,13 @@ def process_mavlink():
             if autopilot != 8:  # MAV_AUTOPILOT_INVALID (e.g. a GCS)
                 base_mode = frame[payload_start + 6]
                 fc_latest_frames[0x7D] = make_crsf_armed(bool(base_mode & 0x80))
+
+        # EXTENDED_SYS_STATE (245): vtol_state at payload offset 0.
+        # 0=undefined, 1=transition to FW, 2=transition to MC, 3=MC, 4=FW.
+        if msg_id == 245 and payload_len >= 2:
+            vtol_state = frame[payload_start]
+            if vtol_state <= 4:
+                fc_latest_frames[0x7E] = make_crsf_vtol_state(vtol_state)
 
         # LOCAL_POSITION_NED has a 28-byte payload.
         if msg_id == 32 and payload_len >= 28:
@@ -870,6 +884,7 @@ def crsf_type_name(frame_type):
         0x32: "COMMAND",
         0x7A: "HOME_GPS",
         0x7D: "ARMED_STATE",
+        0x7E: "VTOL_STATE",
         0x7B: "MSP_RESP",
         0x7C: "MSP_WRITE",
         0x80: "DISPLAYPORT"
