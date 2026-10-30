@@ -873,7 +873,7 @@ def decode_telemetry_frame(frame):
         telemetry_armed = bool(frame[3])
 
     elif frame_type == 0x7E and len(frame) >= 5:
-        states = ("---", "TO FW", "TO MC", "MC", "FW")
+        states = ("---", "TO-FW", "TO-MC", "MC", "FW")
         state = frame[3]
         telemetry_vtol_state = states[state] if state < len(states) else "---"
 
@@ -1095,6 +1095,7 @@ def make_crsf_frame(channels):
 # the handset buttons are released.
 channel_5_latched = CRSF_MIN
 channel_6_latched = CRSF_MIN
+channel_7_latched = CRSF_MIN
 channel_8_latched = CRSF_MIN
 
 # Previous RB/RT states are used so CH5 responds only to a new press.
@@ -1109,6 +1110,7 @@ LEFT_TRIGGER_PRESS_THRESHOLD = 512
 def decode_report(data):
     global channel_5_latched
     global channel_6_latched
+    global channel_7_latched
     global channel_8_latched
     global previous_right_shoulder
     global previous_right_trigger
@@ -1238,9 +1240,20 @@ def decode_report(data):
         channel_6_latched = pwm_to_crsf(1600)
 
     # --------------------------------------------------------
+    # CH7 (latched): top-right / Menu -> 1000 us;
+    #                top-left / View  -> 2000 us.
+    # Releasing either button retains the selected value.
+    # Top-left takes priority if both are pressed.
+    # --------------------------------------------------------
+    if top_right:
+        channel_7_latched = pwm_to_crsf(1000)
+    if top_left:
+        channel_7_latched = pwm_to_crsf(2000)
+
+    # --------------------------------------------------------
     # CH8 ARM channel (latched):
-    #   left shoulder (LB) -> 1000 us (disarm)
-    #   left trigger (LT)  -> 2000 us (arm)
+    #   left shoulder (LB) -> 2000 us (arm)
+    #   left trigger (LT)  -> 1000 us (disarm)
     #   release -> retain selected value
     # LT is analogue; 50% travel counts as pressed.
     # LT takes priority if both controls are held.
@@ -1259,7 +1272,7 @@ def decode_report(data):
 
         channel_5_latched,                          # CH5 latched RB + RT selector
         channel_6_latched,                          # CH6 latched face-button selector
-        CRSF_MIN,                                   # CH7 unused
+        channel_7_latched,                          # CH7 latched Menu/View selector
         channel_8_latched,                          # CH8 ARM latched
 
         CRSF_MIN,                                   # CH9 unused
@@ -1447,7 +1460,6 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
-
 
 
 
