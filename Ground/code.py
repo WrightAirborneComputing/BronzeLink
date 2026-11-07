@@ -1,7 +1,7 @@
 # ============================================================
 # RASPBERRY PI PICO 2 - CircuitPython
 #
-# Turtle Beach Rematch Core -> CRSF RC Channels Packed
+# Turtle Beach Xbox GIP / Sony DualSense USB HID -> CRSF RC Channels Packed
 # plus returned CRSF telemetry from the Ground Radio Pico,
 # with ST7789 LCD telemetry/instrumentation.
 #
@@ -190,6 +190,12 @@ def service_wifi_json():
 
 VID = 0x10F5
 PID = 0x7122
+SONY_VID = 0x054C
+SONY_PID = 0x0CE6
+DUALSENSE_EP_IN = 0x84
+controller_type = None  # "xbox" or "dualsense"
+last_usb_search = 0.0
+USB_SEARCH_INTERVAL = 1.0
 
 EP_IN = 0x81
 EP_OUT = 0x02
@@ -529,7 +535,7 @@ def service_gip_recovery():
     if usb_gip_recovery_done:
         return
 
-    if device is None or not handset_usb_found:
+    if device is None or not handset_usb_found or controller_type != "xbox":
         return
 
     # handset_connected is set only after decode_report() accepts a 0x20
@@ -568,55 +574,54 @@ def service_gip_recovery():
 # ============================================================
 
 def find_controller():
-    global device
-    global usb_gip_last_init_time
-    global usb_gip_recovery_attempts
-    global usb_gip_recovery_done
-    global handset_usb_found
-    global handset_connected
+    global device, controller_type, usb_gip_last_init_time
+    global usb_gip_recovery_attempts, usb_gip_recovery_done
+    global handset_usb_found, handset_connected
+    global previous_buttons, previous_right_shoulder, previous_right_trigger
 
-    dev = usb.core.find(
-        idVendor=VID,
-        idProduct=PID
-    )
+    # Prefer the existing Turtle Beach if both devices are connected.
+    dev = usb.core.find(idVendor=VID, idProduct=PID)
+    kind = "xbox" if dev is not None else None
+    if dev is None:
+        dev = usb.core.find(idVendor=SONY_VID, idProduct=SONY_PID)
+        if dev is not None:
+            kind = "dualsense"
 
     if dev is None:
         handset_usb_found = False
         handset_connected = False
         return False
 
-    print()
-    print(
-        "Turtle Beach controller found VID=%04X PID=%04X"
-        % (dev.idVendor, dev.idProduct)
-    )
-
+    print("\nController detected: %s VID=%04X PID=%04X" %
+          (kind, dev.idVendor, dev.idProduct))
     try:
         print("Product:", dev.product)
     except Exception:
         pass
-
     try:
         dev.set_configuration()
         print("Configuration set")
-
     except Exception as e:
         print("set_configuration:", repr(e))
 
-    initialise_gip(dev)
+    if kind == "xbox":
+        initialise_gip(dev)
+        usb_gip_last_init_time = time.monotonic()
+        usb_gip_recovery_attempts = 0
+        usb_gip_recovery_done = False
+    else:
+        usb_gip_recovery_done = True  # Never run Xbox GIP recovery on Sony HID.
+        usb_gip_last_init_time = None
 
-    # Arm automatic recovery. A valid 0x20 report will cancel it.
-    usb_gip_last_init_time = time.monotonic()
-    usb_gip_recovery_attempts = 0
-    usb_gip_recovery_done = False
-
+    # Do not carry an edge-triggered CH5 state across controllers.
+    previous_buttons = {}
+    previous_right_shoulder = False
+    previous_right_trigger = False
     device = dev
+    controller_type = kind
     handset_usb_found = True
     handset_connected = False
-
-    print("USB active - waiting for valid GIP input")
-    print()
-
+    print("USB active - waiting for valid %s input\n" % kind)
     return True
 
 
@@ -1291,20 +1296,85 @@ def decode_report(data):
 
 
 # ============================================================
+# SONY DUALSENSE HID -> EXISTING XBOX CHANNEL DECODER
+# ============================================================
+# The working DualSense diagnostic verified report 0x01 on EP 0x84.
+# Translate it to a synthetic Xbox GIP report, then reuse the exact
+# CH1-CH16 mapping, latch logic and button event reporting above.
+# DualSense 8-bit sticks: 0=left/up, 255=right/down.
+# Xbox GIP signed sticks: X positive right, Y positive up.
+
+def _put_u16(buf, pos, value):
+    value &= 0xFFFF
+    buf[pos] = value & 0xFF
+    buf[pos + 1] = value >> 8
+
+
+def _dual_axis(raw, invert=False):
+    # 0 -> -32768, 128 -> approx 0, 255 -> +32767.
+    value = (int(raw) * 65535 // 255) - 32768
+    if invert:
+        value = -value
+    return max(-32768, min(32767, value))
+
+
+def decode_dualsense_report(data):
+    if len(data) < 11 or data[0] != 0x01:
+        return None
+
+    # Report bytes: 1..4 sticks, 5..6 triggers, 8..10 buttons.
+    b8, b9, b10 = data[8], data[9], data[10]
+    dpad = b8 & 0x0F
+    # 0 up, 1 up-right, 2 right, 3 down-right,
+    # 4 down, 5 down-left, 6 left, 7 up-left, 8 neutral.
+    up = dpad in (0, 1, 7)
+    right = dpad in (1, 2, 3)
+    down = dpad in (3, 4, 5)
+    left = dpad in (5, 6, 7)
+
+    gip = bytearray(36)
+    gip[0] = 0x20
+    # Face buttons / top centre buttons: A=Cross, B=Circle,
+    # X=Square, Y=Triangle; View=Create, Menu=Options.
+    gip[4] = ((0x04 if b9 & 0x20 else 0) |
+              (0x08 if b9 & 0x10 else 0) |
+              (0x10 if b8 & 0x20 else 0) |
+              (0x20 if b8 & 0x40 else 0) |
+              (0x40 if b8 & 0x10 else 0) |
+              (0x80 if b8 & 0x80 else 0))
+    gip[5] = ((0x01 if down else 0) |
+              (0x02 if left else 0) |
+              (0x04 if up else 0) |
+              (0x08 if right else 0) |
+              (0x10 if b9 & 0x01 else 0) |
+              (0x20 if b9 & 0x02 else 0) |
+              (0x40 if b9 & 0x40 else 0) |
+              (0x80 if b9 & 0x80 else 0))
+    gip[18] = 1 if b10 & 0x01 else 0  # PS -> Xbox/Home
+    _put_u16(gip, 6, (int(data[5]) * 1023 + 127) // 255)
+    _put_u16(gip, 8, (int(data[6]) * 1023 + 127) // 255)
+    _put_u16(gip, 10, _dual_axis(data[1]))
+    _put_u16(gip, 12, _dual_axis(data[2], invert=True))
+    _put_u16(gip, 14, _dual_axis(data[3]))
+    _put_u16(gip, 16, _dual_axis(data[4], invert=True))
+    return decode_report(gip)
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
 print()
 print("============================================")
-print("PICO 2 W - TURTLE BEACH -> CRSF + TELEMETRY + WIFI")
+print("PICO 2 W - XBOX / DUALSENSE -> CRSF + TELEMETRY + WIFI")
 print("============================================")
 print()
 print("USB host: GP2 D+ / GP3 D-")
-print("UART:     GP0 TX / GP1 RX")
+print("UART:     GP4 TX / GP5 RX")
 print("Baud:     115200")
 print("LCD:      ST7789 240x135 on GP8/9/10/11/12/13")
 print()
-print("Waiting for Turtle Beach controller...")
+print("Waiting for Turtle Beach Xbox or Sony DualSense...")
 print()
 
 packet_count = 0
@@ -1336,13 +1406,15 @@ while True:
     process_telemetry_uart()
     service_wifi_json()
     update_lcd()
-    service_gip_recovery()
+    if controller_type == "xbox":
+        service_gip_recovery()
 
     # --------------------------------------------------------
     # Find / reconnect controller
     # --------------------------------------------------------
 
-    if device is None:
+    if device is None and time.monotonic() - last_usb_search >= USB_SEARCH_INTERVAL:
+        last_usb_search = time.monotonic()
         try:
             find_controller()
 
@@ -1362,14 +1434,15 @@ while True:
     if device is not None:
         try:
             n = device.read(
-                EP_IN,
+                EP_IN if controller_type == "xbox" else DUALSENSE_EP_IN,
                 rx_buffer,
                 timeout=5
             )
 
             if n:
                 data = bytes(rx_buffer[:n])
-                channels = decode_report(data)
+                channels = (decode_report(data) if controller_type == "xbox"
+                            else decode_dualsense_report(data))
 
                 if channels is not None:
                     handset_usb_found = True
@@ -1386,8 +1459,16 @@ while True:
         except Exception as e:
             print("USB read error:", repr(e))
             device = None
+            controller_type = None
             handset_usb_found = False
             handset_connected = False
+            # Fail safe on USB loss: never continue transmitting stale
+            # stick demands or a previously latched ARM command.
+            latest_channels = [CRSF_MID] * 4 + [CRSF_MIN] * 12
+            channel_5_latched = CRSF_MIN
+            channel_6_latched = CRSF_MIN
+            channel_7_latched = CRSF_MIN
+            channel_8_latched = CRSF_MIN
 
     # --------------------------------------------------------
     # Fixed-rate CRSF UART transmitter: 25 Hz / every 40 ms
@@ -1460,9 +1541,4 @@ while True:
         tx_count_at_last_debug = packet_count
         last_debug = now
         update_lcd(force=True)
-
-
-
-
-
 
