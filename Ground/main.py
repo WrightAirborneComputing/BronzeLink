@@ -35,6 +35,9 @@ import time
 
 FREQUENCY = 868000000
 
+# CRSF frame destination address (must match handset and aircraft).
+CRSF_ADDRESS = 0xC8
+
 UART_BAUD = 115200
 
 # Maximum radio transmission rate.
@@ -330,7 +333,7 @@ def make_link_statistics(rssi_dbm, snr_db):
         snr,        # downlink SNR
     ])
     body = bytes([0x14]) + payload
-    return bytes([0xC8, len(body) + 1]) + body + bytes([crsf_crc(body)])
+    return bytes([CRSF_ADDRESS, len(body) + 1]) + body + bytes([crsf_crc(body)])
 
 
 def valid_crsf_any(frame):
@@ -519,6 +522,7 @@ def configure_radio():
 
     print("Radio configured")
     print("Frequency:", FREQUENCY)
+    print("CRSF address: 0x%02X" % CRSF_ADDRESS)
     print()
 
 
@@ -565,7 +569,7 @@ def valid_crsf(frame):
     if len(frame) != 26:
         return False
 
-    if frame[0] != 0xC8:
+    if frame[0] != CRSF_ADDRESS:
         return False
 
     if frame[1] != 24:
@@ -617,7 +621,7 @@ def collect_uart_frames():
     while len(rx_buffer) >= 26:
 
         # Find CRSF start byte
-        if rx_buffer[0] != 0xC8:
+        if rx_buffer[0] != CRSF_ADDRESS:
 
             rx_buffer = rx_buffer[1:]
 
@@ -962,5 +966,6 @@ while True:
 
 
     time.sleep_ms(1)
+
 
 
