@@ -210,7 +210,7 @@ AUTH_DONE = bytearray([0x06, 0x20, 0x03, 0x02, 0x01, 0x00])
 # CRSF
 # ============================================================
 
-CRSF_ADDRESS = 0xC8
+CRSF_ADDRESS = 0xC8  # Standard CRSF address; radio LINK_ID is set on both radio Picos.
 CRSF_TYPE = 0x16
 
 CRSF_MIN = 172

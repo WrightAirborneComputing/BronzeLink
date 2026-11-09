@@ -26,7 +26,11 @@ import time
 # ============================================================
 FREQUENCY = 868000000
 TX_POWER_DBM = 14  # SX1262 requested TX power, dBm (up to +22 dBm)
-CRSF_ADDRESS = 0xC8  # CRSF destination/device address used by this link
+CRSF_ADDRESS = 0xC8  # Standard CRSF flight-controller address
+
+# BronzeLink radio network ID: set identically on both radio Picos.
+# This byte is added to LoRa packets, NOT to CRSF/UART frames.
+LINK_ID = 0xCA
 FC_BAUD = 420000
 MAVLINK_BAUD = 115200
 LINK_TIMEOUT_MS = 1000
@@ -334,6 +338,7 @@ def configure_radio():
         "Frequency:",
         FREQUENCY
     )
+    print("CRSF address: 0x%02X | LINK_ID: 0x%02X" % (CRSF_ADDRESS, LINK_ID))
 
 
 def start_receive():
@@ -376,6 +381,8 @@ def start_receive():
 
 
 def transmit_radio_packet(payload):
+    # Prefix the LoRa payload with our network ID; leave CRSF untouched.
+    payload = bytes([LINK_ID]) + bytes(payload)
 
     if not payload or len(payload) > 255:
         return False
@@ -597,7 +604,10 @@ def receive_packet():
     start_receive()
 
 
-    return bytes(data), radio_status
+    # Ignore packets from other BronzeLink networks.
+    if not data or data[0] != LINK_ID:
+        return None, None
+    return bytes(data[1:]), radio_status
 
 
 # ============================================================
@@ -825,7 +835,7 @@ def valid_crsf(frame):
     if len(frame) != 26:
         return False
 
-    if frame[0] != 0xC8:
+    if frame[0] != CRSF_ADDRESS:
         return False
 
     if frame[1] != 24:
@@ -1254,3 +1264,4 @@ while True:
 
 
     time.sleep_ms(2)
+

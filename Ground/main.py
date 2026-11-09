@@ -38,6 +38,10 @@ FREQUENCY = 868000000
 # CRSF frame destination address (must match handset and aircraft).
 CRSF_ADDRESS = 0xC8
 
+# BronzeLink radio network ID: set identically on both radio Picos.
+# This byte is added to LoRa packets, NOT to CRSF/UART frames.
+LINK_ID = 0xCA
+
 UART_BAUD = 115200
 
 # Maximum radio transmission rate.
@@ -312,7 +316,10 @@ def receive_radio_packet():
     clear_irq()
     start_receive()
 
-    return bytes(data), radio_status
+    # Ignore packets from other BronzeLink networks.
+    if not data or data[0] != LINK_ID:
+        return None, None
+    return bytes(data[1:]), radio_status
 
 
 def make_link_statistics(rssi_dbm, snr_db):
@@ -523,6 +530,7 @@ def configure_radio():
     print("Radio configured")
     print("Frequency:", FREQUENCY)
     print("CRSF address: 0x%02X" % CRSF_ADDRESS)
+    print("BronzeLink radio LINK_ID: 0x%02X" % LINK_ID)
     print()
 
 
@@ -652,6 +660,8 @@ def collect_uart_frames():
 # ============================================================
 
 def send_radio_packet(data):
+    # Prefix the LoRa payload with our network ID; leave CRSF untouched.
+    data = bytes([LINK_ID]) + bytes(data)
 
     # Payload must fit
     if len(data) > 255:
@@ -966,6 +976,7 @@ while True:
 
 
     time.sleep_ms(1)
+
 
 
 
