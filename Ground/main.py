@@ -33,7 +33,21 @@ import time
 # SETTINGS
 # ============================================================
 
-FREQUENCY = 868000000
+# Select the same radio channel on both BronzeLink radio Picos.
+# IMPORTANT: These are illustrative centre frequencies, NOT a list of
+# UK-authorised operating channels. Check occupied bandwidth (BW500),
+# power, duty cycle and applicable Ofcom requirements before transmitting.
+RADIO_CHANNEL = 1
+RADIO_CHANNELS = {
+    1: 868000000,
+    2: 868500000,
+    3: 869000000,
+    4: 869500000,
+}
+
+if RADIO_CHANNEL not in RADIO_CHANNELS:
+    raise ValueError("Invalid RADIO_CHANNEL: %s" % RADIO_CHANNEL)
+FREQUENCY = RADIO_CHANNELS[RADIO_CHANNEL]
 
 # CRSF frame destination address (must match handset and aircraft).
 CRSF_ADDRESS = 0xC8
@@ -528,6 +542,7 @@ def configure_radio():
     clear_irq()
 
     print("Radio configured")
+    print("Radio channel:", RADIO_CHANNEL)
     print("Frequency:", FREQUENCY)
     print("CRSF address: 0x%02X" % CRSF_ADDRESS)
     print("BronzeLink radio LINK_ID: 0x%02X" % LINK_ID)
@@ -976,7 +991,6 @@ while True:
 
 
     time.sleep_ms(1)
-
 
 
 

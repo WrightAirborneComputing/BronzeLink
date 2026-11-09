@@ -24,7 +24,21 @@ import time
 # ============================================================
 # SETTINGS
 # ============================================================
-FREQUENCY = 868000000
+# Select the same radio channel on both BronzeLink radio Picos.
+# IMPORTANT: These are illustrative centre frequencies, NOT a list of
+# UK-authorised operating channels. Check occupied bandwidth (BW500),
+# power, duty cycle and applicable Ofcom requirements before transmitting.
+RADIO_CHANNEL = 1
+RADIO_CHANNELS = {
+    1: 868000000,
+    2: 868500000,
+    3: 869000000,
+    4: 869500000,
+}
+
+if RADIO_CHANNEL not in RADIO_CHANNELS:
+    raise ValueError("Invalid RADIO_CHANNEL: %s" % RADIO_CHANNEL)
+FREQUENCY = RADIO_CHANNELS[RADIO_CHANNEL]
 TX_POWER_DBM = 14  # SX1262 requested TX power, dBm (up to +22 dBm)
 CRSF_ADDRESS = 0xC8  # Standard CRSF flight-controller address
 
@@ -334,6 +348,7 @@ def configure_radio():
         "Radio configured"
     )
 
+    print("Radio channel:", RADIO_CHANNEL)
     print(
         "Frequency:",
         FREQUENCY
@@ -1264,4 +1279,3 @@ while True:
 
 
     time.sleep_ms(2)
-
